@@ -1,0 +1,7 @@
+build/
+build-*/
+# local data: extracted disc, mod copy, GLINUX runtime, settings
+work/
+rom/
+*.rvz
+*.iso

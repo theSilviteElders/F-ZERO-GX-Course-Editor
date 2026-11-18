@@ -888,7 +888,9 @@ void Editor::DrawMenu()
         "Gizmo:     W move, E rotate, R scale, F focus\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
         "Note: road models are visuals only. The driving surface and physics come\n"
-        "from the track spline (yellow line), which cannot be edited yet.");
+        "from the track spline (yellow line), which cannot be edited yet.\n\n"
+        "AI GENERATED: this tool's source code and documentation were generated\n"
+        "with AI (Claude by Anthropic) based on the maintainer's instructions.");
     ImGui::EndMenu();
   }
   ImGui::SameLine(ImGui::GetWindowWidth() - 360);

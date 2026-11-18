@@ -1,5 +1,11 @@
 # F-Zero GX Course Editor
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/eu-ai-icons/ai-generated-white.svg">
+  <img src="docs/eu-ai-icons/ai-generated-black.svg" height="32"
+       alt="AI generated: the source code and documentation of this project were generated with AI.">
+</picture>
+
 https://github.com/theSilviteElders/F-ZERO-GX-Course-Editor.git
 
 A standalone course editor for F-Zero GX (USA, `GFZE01`) with a test button for
@@ -118,6 +124,14 @@ and write to a separate file), `unlz`, `lz`.
 - Whether every object really appears in the game where it was moved
   (e.g. visibility/collision grids) has to be tested in the game.
 - Textures (`.tpl`), track spline editing, duplicating objects.
+
+## AI disclosure
+
+The source code and documentation of this project were generated with AI
+(Claude by Anthropic), based on the maintainer's instructions. The maintainer
+chose the direction, tested the results in the game and reviews the changes.
+Commits written with AI carry a `Co-Authored-By: Claude` line. The label above
+is the official [EU icon for AI-generated content](docs/eu-ai-icons/README.md).
 
 ## License
 

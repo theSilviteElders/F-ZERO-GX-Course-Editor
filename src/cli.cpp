@@ -4,6 +4,7 @@
 //   fzgx-cli lz <in.bin> <out.lz>
 #include "lz.hpp"
 #include "project.hpp"
+#include "tpl.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -193,6 +194,37 @@ int main(int argc, char** argv)
           std::printf("  v0=(%.1f %.1f %.1f)\n", p.v[0][0], p.v[0][1], p.v[0][2]);
         }
       return WriteFileAtomic(argv[5], LzCompress(out)) ? 0 : 1;
+    }
+    if (cmd == "tplsheet" && argc == 4)  // tplsheet <in.tpl.lz> <out.ppm>: all textures, 128 px cells
+    {
+      const TplFile tpl(LzDecompress(*ReadFile(argv[2])));
+      const int cell = 128, cols = 8, n = tpl.count(), rows = (n + cols - 1) / cols;
+      std::vector<std::uint8_t> img(std::size_t(cols * cell) * rows * cell * 3, 40);
+      int decoded = 0;
+      for (int i = 0; i < n; ++i)
+      {
+        const auto t = tpl.Decode(i);
+        if (!t)
+          continue;
+        ++decoded;
+        for (int y = 0; y < cell; ++y)
+          for (int x = 0; x < cell; ++x)
+          {
+            const int sx = x * t->width / cell, sy = y * t->height / cell;
+            const std::uint8_t* p = &t->rgba[(std::size_t(sy) * t->width + sx) * 4];
+            // checkerboard behind transparent pixels
+            const int bg = ((x / 8 + y / 8) & 1) ? 90 : 60;
+            std::uint8_t* q = &img[((std::size_t((i / cols) * cell + y)) * cols * cell + (i % cols) * cell + x) * 3];
+            for (int k = 0; k < 3; ++k)
+              q[k] = std::uint8_t((p[k] * p[3] + bg * (255 - p[3])) / 255);
+          }
+      }
+      FILE* f = std::fopen(argv[3], "wb");
+      std::fprintf(f, "P6 %d %d 255\n", cols * cell, rows * cell);
+      std::fwrite(img.data(), 1, img.size(), f);
+      std::fclose(f);
+      std::printf("%d of %d textures decoded\n", decoded, n);
+      return 0;
     }
     if (cmd == "selftest" && argc == 3)
       return SelfTest(argv[2]);

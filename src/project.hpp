@@ -21,6 +21,7 @@ struct Settings
   fs::path glinux_user_dir;  // GLINUX user dir (saves, config, controller)
   std::string launcher = "glinux";  // "glinux" or "dolphin"
   bool quickstart = true;           // start the edited course directly (Practice)
+  bool textures = true;             // load and show the original textures (.tpl)
 
   fs::path disc() const { return workspace / "disc"; }
   fs::path mod() const { return workspace / "mod" / "GFZE01"; }

@@ -13,9 +13,23 @@ A standalone course editor for F-Zero GX (USA, `GFZE01`) with a test button for
 milestone: view courses and move, rotate and scale placed objects (dash plates,
 signs, buildings, road models …) together with their boost areas.
 
+![Mute City – Twist Road in the editor, with original textures](docs/screenshots/mute-city.jpg)
+
 No game data is included: you need your own F-Zero GX image (USA, RVZ or ISO).
 Put it in `rom/` (inside the repository, git-ignored), in a `rom/` folder next
 to the repository, or pick it in the editor under *Settings*.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Editing a dash plate: plate, arrow marker and ring move together, the yellow outline is the boost collision area](docs/screenshots/dash-plate-editing.jpg) | ![Big Blue – Drift Highway](docs/screenshots/big-blue.jpg) |
+| Editing a dash plate: plate, arrow marker and ring are linked; the yellow outline is the boost area that moves along. | Big Blue – Drift Highway |
+| ![Port Town](docs/screenshots/port-town.jpg) | |
+| Port Town | |
+
+The screenshots show the game's own models and textures, loaded from your
+disc at runtime.
 
 ## Building
 
@@ -62,6 +76,9 @@ editor under *File → Settings* or with
   the open course (see *Direct start*).
 - **Linked objects** (e.g. dash plate + arrow marker + ring) are edited
   together: same name prefix, within the radius.
+- **Textures:** *View → Textures* or *File → Settings → Load textures*
+  (on by default, saved in `work/editor.ini`). Without textures the models are
+  drawn in their material colour, which is lighter and faster.
 
 ## Direct start
 
@@ -102,9 +119,14 @@ NTSC-U (`GFZE01`) only. There is no direct start with Dolphin as launcher.
   along with it, recomputes plane and edges, and registers them in newly
   covered grid cells by appending new index lists to the file. Outside the
   grid a polygon probably has no effect (the editor warns).
-- `.gma`: GCMF models with GX display lists. Geometry is rendered with the
-  material colour, no textures yet. Course models are in `stage/stNN.gma`,
-  shared objects in `bg/bg_*.gma`.
+- `.gma`: GCMF models with GX display lists. Course models are in
+  `stage/stNN.gma`, shared objects in `bg/bg_*.gma`. Texture slots (`0x20`
+  bytes after the `0x40` GCMF header): `+0x03` wrap flags, `+0x04` index into
+  the `.tpl` of the same name; every mesh uses its first texture layer.
+- `.tpl`: `u32 count`, then `0x10` per texture (format, offset, width, height,
+  mip levels, `0x1234`); offset 0 = empty slot. GX formats I4, I8, IA4, IA8,
+  RGB565, RGB5A3, RGBA8 and CMPR are decoded
+  (`./build/fzgx-cli tplsheet <file.tpl.lz> <out.ppm>` writes a contact sheet).
 
 `./build/fzgx-cli selftest work` checks all 37 courses: parsing, unchanged
 round trip (byte-exact), LZ round trip, transform formula, collision formulas
@@ -123,7 +145,9 @@ and write to a separate file), `unlz`, `lz`.
   models that are not found as a red box.
 - Whether every object really appears in the game where it was moved
   (e.g. visibility/collision grids) has to be tested in the game.
-- Textures (`.tpl`), track spline editing, duplicating objects.
+- Textures use only the first layer and the first UV set (no multi-texture
+  blending, texture scrolling or environment maps).
+- Track spline editing, duplicating objects.
 
 ## AI disclosure
 

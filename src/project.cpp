@@ -78,6 +78,8 @@ void Settings::Load()
       launcher = value;
     else if (key == "quickstart")
       quickstart = value != "0" && value != "false";
+    else if (key == "textures")
+      textures = value != "0" && value != "false";
   }
 }
 
@@ -91,7 +93,8 @@ void Settings::Save() const
       << "glinux_appimage=" << glinux_appimage.string() << "\n"
       << "glinux_user_dir=" << glinux_user_dir.string() << "\n"
       << "launcher=" << launcher << "\n"
-      << "quickstart=" << (quickstart ? "true" : "false") << "\n";
+      << "quickstart=" << (quickstart ? "true" : "false") << "\n"
+      << "textures=" << (textures ? "true" : "false") << "\n";
 }
 
 std::string Project::CourseFile(int id)

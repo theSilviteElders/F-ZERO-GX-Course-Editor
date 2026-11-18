@@ -95,6 +95,7 @@ the edge of the grid.
 | Move / rotate / scale | `W` / `E` / `R` |
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Save / test in game | Ctrl+S / F5 |
+| Textures on/off | *View → Textures* |
 
 ## Checking without the GUI (optional)
 

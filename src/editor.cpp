@@ -148,11 +148,60 @@ void Editor::Status(std::string msg, bool error)
 
 void Editor::RefreshCourses() { courses_ = project_.DiscReady() ? project_.ListCourses() : std::vector<CourseInfo>{}; }
 
-void Editor::CloseCourse()
+void Editor::FreeModels()
 {
   for (auto& [name, mesh] : gpu_)
     renderer_.Free(mesh);
   gpu_.clear();
+  for (auto& [key, tex] : textures_)
+    renderer_.FreeTexture(tex);
+  textures_.clear();
+}
+
+void Editor::UploadModels()
+{
+  FreeModels();
+  if (!course_)
+    return;
+  const bool textured = project_.settings().textures;
+  for (const auto& in : course_->instances())
+  {
+    if (gpu_.count(in.name))
+      continue;
+    const ModelMesh* m = models_->Find(in.name);
+    if (!m || m->positions.empty())
+    {
+      gpu_[in.name] = GpuMesh{};
+      continue;
+    }
+    GpuMesh g = renderer_.Upload(*m, textured);
+    if (textured)
+    {
+      const TplFile* tpl = models_->Textures(m->archive);
+      for (const auto& part : m->parts)
+      {
+        GpuPart gp{part.first, part.count, 0};
+        if (tpl && part.tpl >= 0)
+        {
+          const std::uint64_t key = std::uint64_t(m->archive) << 32 | std::uint64_t(part.tpl) << 8 | part.wrap;
+          auto it = textures_.find(key);
+          if (it == textures_.end())
+          {
+            const auto tex = tpl->Decode(part.tpl);
+            it = textures_.emplace(key, tex ? renderer_.CreateTexture(*tex, part.wrap) : 0u).first;
+          }
+          gp.texture = it->second;
+        }
+        g.parts.push_back(gp);
+      }
+    }
+    gpu_[in.name] = std::move(g);
+  }
+}
+
+void Editor::CloseCourse()
+{
+  FreeModels();
   renderer_.Free(collision_mesh_);
   course_.reset();
   models_.reset();
@@ -185,14 +234,7 @@ void Editor::OpenCourse(int id)
     original_.push_back(Get(i));
   for (const auto& p : course_->polys())
     original_polys_.push_back(p.v);
-  // Upload every referenced model once.
-  for (const auto& in : course_->instances())
-  {
-    if (gpu_.count(in.name))
-      continue;
-    const ModelMesh* m = models_->Find(in.name);
-    gpu_[in.name] = (m && !m->positions.empty()) ? renderer_.Upload(*m) : GpuMesh{};
-  }
+  UploadModels();
   background_.assign(course_->instances().size(), 0);
   for (int i = 0; i < int(course_->instances().size()); ++i)
   {
@@ -868,6 +910,11 @@ void Editor::DrawMenu()
   if (ImGui::BeginMenu("View"))
   {
     ImGui::MenuItem("Models", nullptr, &show_models_);
+    if (ImGui::MenuItem("Textures", nullptr, &project_.settings().textures))
+    {
+      UploadModels();
+      project_.settings().Save();
+    }
     ImGui::MenuItem("Background (ground/sky)", nullptr, &show_background_);
     ImGui::MenuItem("Placeholders (missing/animated models)", nullptr, &show_missing_);
     ImGui::MenuItem("Track path (checkpoints)", nullptr, &show_track_);
@@ -1188,6 +1235,9 @@ void Editor::DrawSettings()
     if (!course_ && !courses_.empty())
       OpenCourse(courses_.front().id);
   }
+  ImGui::SeparatorText("Display");
+  if (ImGui::Checkbox("Load textures", &s.textures))
+    UploadModels();
   ImGui::SeparatorText("Testing");
   int mode = s.launcher == "dolphin" ? 1 : 0;
   ImGui::RadioButton("F-ZERO GLINUX", &mode, 0);

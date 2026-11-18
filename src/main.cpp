@@ -8,6 +8,7 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl3.h>
 
+#include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -81,10 +82,11 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision]: render, save, quit (for testing).
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures]:
+  // render, save, quit (for testing and documentation).
   std::string screenshot;
   int start_course = -1, start_select = -1;
-  bool start_collision = false;
+  bool start_collision = false, no_textures = false;
   for (int i = 1; i < argc; ++i)
   {
     const std::string_view a = argv[i];
@@ -98,9 +100,13 @@ int main(int argc, char** argv)
       start_select = std::atoi(argv[++i]);
     else if (a == "--collision")
       start_collision = true;
+    else if (a == "--no-textures")
+      no_textures = true;
   }
   settings.Load();
   DetectDefaults(settings);
+  if (no_textures)
+    settings.textures = false;
 
   if (!SDL_Init(SDL_INIT_VIDEO))
   {
@@ -176,6 +182,8 @@ int main(int argc, char** argv)
           (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && ev.window.windowID == SDL_GetWindowID(window)))
         editor.RequestQuit();
     }
+    if (!screenshot.empty())
+      io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);  // screenshots: no hover effects from the real mouse
     const Uint64 now = SDL_GetTicksNS();
     const float dt = std::min(0.1f, float(now - last) / 1e9f);
     last = now;

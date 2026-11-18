@@ -20,7 +20,7 @@ constexpr std::uint32_t kNbt = 1u << 25;
 struct VertexLayout
 {
   int size = 0;
-  int pos = -1, nrm = -1, clr = -1;
+  int pos = -1, nrm = -1, clr = -1, uv = -1;
 };
 
 VertexLayout Layout(std::uint32_t vf)
@@ -53,7 +53,11 @@ VertexLayout Layout(std::uint32_t vf)
     s += 4;
   for (int k = 0; k < 8; ++k)
     if (vf & (0x2000u << k))
+    {
+      if (l.uv < 0)
+        l.uv = s;
       s += 8;
+    }
   l.size = s;
   return l;
 }
@@ -66,7 +70,8 @@ void DecodeDisplayList(const Bytes& d, std::size_t o, std::size_t size, std::uin
   struct V
   {
     std::array<float, 3> p, n;
-    std::array<std::uint8_t, 4> c;
+    std::array<std::uint8_t, 4> c, vc;
+    std::array<float, 2> uv;
     bool has_n;
   };
   std::vector<V> prim;
@@ -96,9 +101,16 @@ void DecodeDisplayList(const Bytes& d, std::size_t o, std::size_t size, std::uin
         for (int k = 0; k < 3; ++k)
           v.n[k] = F32(d, o + l.nrm + 4 * k);
       v.c = tint;
+      v.vc = {255, 255, 255, 255};
       if (l.clr >= 0)
         for (int k = 0; k < 4; ++k)
+        {
           v.c[k] = std::uint8_t(d[o + l.clr + k] * tint[k] / 255);
+          v.vc[k] = d[o + l.clr + k];
+        }
+      v.uv = {0, 0};
+      if (l.uv >= 0)
+        v.uv = {F32(d, o + l.uv), F32(d, o + l.uv + 4)};
       prim.push_back(v);
     }
     auto emit = [&](const V& a, const V& b, const V& c) {
@@ -118,6 +130,8 @@ void DecodeDisplayList(const Bytes& d, std::size_t o, std::size_t size, std::uin
         mesh.positions.push_back(v->p);
         mesh.normals.push_back(v->has_n ? v->n : fn);
         mesh.colors.push_back(v->c);
+        mesh.vcolors.push_back(v->vc);
+        mesh.uvs.push_back(v->uv);
       }
     };
     if (cmd == 0x90)
@@ -164,9 +178,26 @@ ModelMesh DecodeGcmf(const Bytes& d, std::size_t o)
     return mesh;
   }
   const int meshes = U16(d, o + 0x1A) + U16(d, o + 0x1C);
+  // Texture slots (0x20 bytes each after the 0x40 header): +0x03 wrap flags, +0x04 tpl index.
+  const int tex_count = U16(d, o + 0x18);
+  std::vector<std::pair<int, std::uint8_t>> slots;
+  for (int t = 0; t < tex_count && o + 0x40 + std::size_t(t + 1) * 0x20 <= d.size(); ++t)
+  {
+    const std::size_t e = o + 0x40 + std::size_t(t) * 0x20;
+    slots.emplace_back(U16(d, e + 0x04), d[e + 0x03]);
+  }
   std::size_t p = o + U32(d, o + 0x20);
   for (int m = 0; m < meshes && p + 0x60 <= d.size(); ++m)
   {
+    ModelMesh::Part part;
+    part.first = int(mesh.positions.size());
+    const int layers = d[p + 0x12];
+    const int slot = U16(d, p + 0x16);
+    if (layers > 0 && slot < int(slots.size()))
+    {
+      part.tpl = slots[slot].first;
+      part.wrap = slots[slot].second;
+    }
     std::array<std::uint8_t, 4> tint = {d[p + 4], d[p + 5], d[p + 6], 255};
     // Some materials are nearly black (lit purely by textures); keep them visible.
     if (tint[0] + tint[1] + tint[2] < 120)
@@ -201,6 +232,9 @@ ModelMesh DecodeGcmf(const Bytes& d, std::size_t o)
       }
     }
     p = q;
+    part.count = int(mesh.positions.size()) - part.first;
+    if (part.count > 0)
+      mesh.parts.push_back(part);
   }
   if (!mesh.positions.empty())
   {
@@ -220,7 +254,9 @@ void ModelLibrary::AddArchive(const std::filesystem::path& path)
   auto raw = ReadFile(path);
   if (!raw)
     return;
-  Archive a{path, path.extension() == ".lz" ? LzDecompress(*raw) : std::move(*raw)};
+  Archive a;
+  a.path = path;
+  a.data = path.extension() == ".lz" ? LzDecompress(*raw) : std::move(*raw);
   const int id = int(archives_.size());
   for (const auto& [name, offset] : ListGma(a.data))
     index_.try_emplace(name, Entry{id, offset});
@@ -238,6 +274,7 @@ const ModelMesh* ModelLibrary::Find(const std::string& name)
     try
     {
       mesh = std::make_unique<ModelMesh>(DecodeGcmf(archives_[it->second.archive].data, it->second.offset));
+      mesh->archive = it->second.archive;
     }
     catch (const FormatError&)
     {
@@ -247,6 +284,37 @@ const ModelMesh* ModelLibrary::Find(const std::string& name)
   const ModelMesh* result = mesh.get();
   cache_[name] = std::move(mesh);
   return result;
+}
+
+const TplFile* ModelLibrary::Textures(int archive)
+{
+  if (archive < 0 || archive >= int(archives_.size()))
+    return nullptr;
+  Archive& a = archives_[archive];
+  if (!a.tpl_loaded)
+  {
+    a.tpl_loaded = true;
+    std::string name = a.path.filename().string();
+    const auto pos = name.find(".gma");
+    if (pos != std::string::npos)
+    {
+      name.replace(pos, 4, ".tpl");
+      if (auto raw = ReadFile(a.path.parent_path() / name))
+      {
+        try
+        {
+          a.tpl = std::make_unique<TplFile>(name.size() > 3 && name.substr(name.size() - 3) == ".lz"
+                                                ? LzDecompress(*raw)
+                                                : std::move(*raw));
+        }
+        catch (const FormatError&)
+        {
+          a.tpl.reset();
+        }
+      }
+    }
+  }
+  return a.tpl.get();
 }
 
 std::vector<std::string> ModelLibrary::archives() const

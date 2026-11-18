@@ -8,10 +8,17 @@
 
 namespace fzgx
 {
+struct GpuPart
+{
+  int first = 0, count = 0;
+  unsigned texture = 0;  // 0 = untextured
+};
+
 struct GpuMesh
 {
   unsigned vao = 0, vbo = 0;
   int count = 0;
+  std::vector<GpuPart> parts;  // empty = draw everything untextured
 };
 
 struct LineVertex
@@ -26,7 +33,12 @@ public:
   bool Init();
   void Shutdown();
 
-  GpuMesh Upload(const ModelMesh& mesh);
+  // textured: use vertex colours + UVs (textures are attached via GpuMesh::parts);
+  // otherwise the material tint colours.
+  GpuMesh Upload(const ModelMesh& mesh, bool textured = false);
+  // RGBA texture with mipmaps; wrap = GCMF wrap flags.
+  unsigned CreateTexture(const Texture& tex, std::uint8_t wrap);
+  void FreeTexture(unsigned& tex);
   // Triangle soup with one colour per triangle (collision view).
   GpuMesh UploadColored(const std::vector<std::array<float, 3>>& tris,
                         const std::vector<std::uint32_t>& tri_colors);
@@ -40,7 +52,7 @@ public:
 
 private:
   unsigned program_ = 0, line_program_ = 0;
-  int u_vp_ = -1, u_model_ = -1, u_tint_ = -1, u_highlight_ = -1, u_eye_ = -1;
+  int u_vp_ = -1, u_model_ = -1, u_tint_ = -1, u_highlight_ = -1, u_eye_ = -1, u_use_tex_ = -1, u_tex_ = -1;
   int ul_vp_ = -1;
   unsigned line_vao_ = 0, line_vbo_ = 0;
   glm::mat4 view_proj_{1};

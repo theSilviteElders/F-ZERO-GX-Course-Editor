@@ -65,6 +65,9 @@ private:
   void RefreshCourses();
   void OpenCourse(int id);
   void CloseCourse();
+  // (Re-)uploads all models of the open course, with or without textures.
+  void UploadModels();
+  void FreeModels();
   bool Save();
   void Launch();
 
@@ -111,6 +114,7 @@ private:
   std::unique_ptr<ModelLibrary> models_;
   std::string venue_;
   std::map<std::string, GpuMesh> gpu_;
+  std::map<std::uint64_t, unsigned> textures_;  // (archive, tpl index, wrap) -> GL texture
   GpuMesh collision_mesh_;
   bool dirty_ = false;
 

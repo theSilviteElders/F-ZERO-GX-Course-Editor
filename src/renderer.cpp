@@ -14,27 +14,36 @@ struct Vertex
   float p[3];
   float n[3];
   std::uint8_t c[4];
+  float uv[2];
 };
 
 const char* kMeshVs = R"(#version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec4 aCol;
+layout(location=3) in vec2 aUV;
 uniform mat4 uVP; uniform mat4 uModel;
-out vec3 vNrm; out vec4 vCol; out vec3 vWorld;
+out vec3 vNrm; out vec4 vCol; out vec3 vWorld; out vec2 vUV;
 void main(){
   vec4 w = uModel * vec4(aPos,1.0);
   vWorld = w.xyz;
   vNrm = mat3(uModel) * aNrm;
   vCol = aCol;
+  vUV = aUV;
   gl_Position = uVP * w;
 })";
 
 const char* kMeshFs = R"(#version 330 core
-in vec3 vNrm; in vec4 vCol; in vec3 vWorld;
+in vec3 vNrm; in vec4 vCol; in vec3 vWorld; in vec2 vUV;
 uniform vec4 uTint; uniform vec4 uHighlight; uniform vec3 uEye;
+uniform int uUseTex; uniform sampler2D uTex;
 out vec4 frag;
 void main(){
+  vec4 tex = vec4(1.0);
+  if (uUseTex == 1) {
+    tex = texture(uTex, vUV);
+    if (tex.a < 0.35) discard;            // cut-out textures (fences, signs, foliage)
+  }
   vec3 n = vNrm;
   if (dot(n,n) < 1e-8) n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
   n = normalize(n);
@@ -43,8 +52,8 @@ void main(){
   vec3 l = normalize(vec3(0.4, 0.9, 0.3));
   float diff = max(dot(n,l),0.0);
   float hemi = 0.5 + 0.5*n.y;
-  vec3 base = vCol.rgb * uTint.rgb;
-  vec3 c = base*(0.35 + 0.25*hemi + 0.55*diff);
+  vec3 base = vCol.rgb * uTint.rgb * tex.rgb;
+  vec3 c = uUseTex == 1 ? base*(0.55 + 0.2*hemi + 0.4*diff) : base*(0.35 + 0.25*hemi + 0.55*diff);
   float dist = length(uEye - vWorld);
   c = mix(c, vec3(0.08,0.09,0.12), clamp((dist-4000.0)/12000.0, 0.0, 0.6));
   frag = vec4(c + uHighlight.rgb*uHighlight.a, vCol.a*uTint.a);
@@ -103,6 +112,8 @@ GpuMesh UploadVertices(const std::vector<Vertex>& v)
   glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n));
   glEnableVertexAttribArray(2);
   glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), (void*)offsetof(Vertex, c));
+  glEnableVertexAttribArray(3);
+  glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
   glBindVertexArray(0);
   m.count = int(v.size());
   return m;
@@ -120,6 +131,8 @@ bool Renderer::Init()
   u_tint_ = glGetUniformLocation(program_, "uTint");
   u_highlight_ = glGetUniformLocation(program_, "uHighlight");
   u_eye_ = glGetUniformLocation(program_, "uEye");
+  u_use_tex_ = glGetUniformLocation(program_, "uUseTex");
+  u_tex_ = glGetUniformLocation(program_, "uTex");
   ul_vp_ = glGetUniformLocation(line_program_, "uVP");
   glGenVertexArrays(1, &line_vao_);
   glGenBuffers(1, &line_vbo_);
@@ -141,7 +154,7 @@ void Renderer::Shutdown()
   glDeleteVertexArrays(1, &line_vao_);
 }
 
-GpuMesh Renderer::Upload(const ModelMesh& mesh)
+GpuMesh Renderer::Upload(const ModelMesh& mesh, bool textured)
 {
   std::vector<Vertex> v(mesh.positions.size());
   for (std::size_t i = 0; i < v.size(); ++i)
@@ -152,9 +165,39 @@ GpuMesh Renderer::Upload(const ModelMesh& mesh)
       v[i].n[k] = mesh.normals[i][k];
     }
     for (int k = 0; k < 4; ++k)
-      v[i].c[k] = mesh.colors[i][k];
+      v[i].c[k] = textured ? mesh.vcolors[i][k] : mesh.colors[i][k];
+    v[i].uv[0] = mesh.uvs[i][0];
+    v[i].uv[1] = mesh.uvs[i][1];
   }
   return UploadVertices(v);
+}
+
+unsigned Renderer::CreateTexture(const Texture& t, std::uint8_t wrap)
+{
+  GLuint id = 0;
+  glGenTextures(1, &id);
+  glBindTexture(GL_TEXTURE_2D, id);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t.width, t.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, t.rgba.data());
+  glGenerateMipmap(GL_TEXTURE_2D);
+  auto mode = [](int bits) {
+    return bits == 1 ? GL_REPEAT : bits == 2 ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
+  };
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode(wrap >> 2 & 3));
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode(wrap >> 4 & 3));
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  if (epoxy_has_gl_extension("GL_EXT_texture_filter_anisotropic"))
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 8.0f);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return id;
+}
+
+void Renderer::FreeTexture(unsigned& tex)
+{
+  if (tex)
+    glDeleteTextures(1, &tex);
+  tex = 0;
 }
 
 GpuMesh Renderer::UploadColored(const std::vector<std::array<float, 3>>& tris,
@@ -214,7 +257,23 @@ void Renderer::Draw(const GpuMesh& m, const glm::mat4& model, const glm::vec4& t
   if (wire)
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
   glBindVertexArray(m.vao);
-  glDrawArrays(GL_TRIANGLES, 0, m.count);
+  if (m.parts.empty())
+  {
+    glUniform1i(u_use_tex_, 0);
+    glDrawArrays(GL_TRIANGLES, 0, m.count);
+  }
+  else
+  {
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(u_tex_, 0);
+    for (const auto& p : m.parts)
+    {
+      glUniform1i(u_use_tex_, p.texture ? 1 : 0);
+      if (p.texture)
+        glBindTexture(GL_TEXTURE_2D, p.texture);
+      glDrawArrays(GL_TRIANGLES, p.first, p.count);
+    }
+  }
   if (wire)
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 }

@@ -8,7 +8,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Format library (no GUI dependencies).
-add_library(fzgx STATIC src/lz.cpp src/coli.cpp src/gma.cpp src/project.cpp)
+add_library(fzgx STATIC src/lz.cpp src/coli.cpp src/gma.cpp src/tpl.cpp src/project.cpp)
 target_include_directories(fzgx PUBLIC src)
 target_compile_definitions(fzgx PUBLIC FZGX_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(fzgx PRIVATE -Wall -Wextra)

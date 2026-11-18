@@ -132,7 +132,7 @@ bool Editor::Init()
   if (!project_.DiscReady())
   {
     show_settings_ = true;
-    Status("Keine extrahierte Disc gefunden. Bitte in den Einstellungen die ROM wählen und extrahieren.", true);
+    Status("No extracted disc found. Choose your ROM in Settings and extract it.", true);
   }
   else if (!courses_.empty())
     OpenCourse(courses_.front().id);
@@ -177,7 +177,7 @@ void Editor::OpenCourse(int id)
   catch (const std::exception& e)
   {
     course_.reset();
-    Status(std::string("Kurs konnte nicht geladen werden: ") + e.what(), true);
+    Status(std::string("Could not load course: ") + e.what(), true);
     return;
   }
   course_id_ = id;
@@ -211,9 +211,9 @@ void Editor::OpenCourse(int id)
   bool from_mod = false;
   for (const auto& c : courses_)
     from_mod |= c.id == id && c.modified;
-  Status("Kurs " + std::to_string(id) + (venue_.empty() ? "" : " (" + venue_ + ")") + " geladen: " +
-         std::to_string(course_->instances().size()) + " Objekte" +
-         (from_mod ? ", bearbeitete Fassung aus dem Mod-Ordner." : "."));
+  Status("Course " + std::to_string(id) + (venue_.empty() ? "" : " (" + venue_ + ")") + " loaded: " +
+         std::to_string(course_->instances().size()) + " objects" +
+         (from_mod ? ", edited version from the mod folder." : "."));
   FrameCourse();
 }
 
@@ -448,9 +448,9 @@ void Editor::Launch()
   const bool quick = project_.settings().quickstart && project_.settings().launcher == "glinux";
   const bool ok = project_.Launch(course_id_, msg);
   Status(!ok      ? msg
-         : quick ? "Spiel startet direkt auf Kurs " + std::to_string(course_id_) +
-                       " (Practice). Beim ersten Mal navigiert es ca. 30 s automatisch durch die Menüs. " + msg
-                 : "Spiel startet aus dem Mod-Ordner, Kurs im Spiel wählen. " + msg,
+         : quick ? "Starting the game directly on course " + std::to_string(course_id_) +
+                       " (Practice). The first time it navigates the menus automatically for about 30 s. " + msg
+                 : "Starting the game from the mod folder, pick the course in the game. " + msg,
          !ok);
 }
 
@@ -835,14 +835,14 @@ void Editor::DrawMenu()
 {
   if (!ImGui::BeginMainMenuBar())
     return;
-  if (ImGui::BeginMenu("Datei"))
+  if (ImGui::BeginMenu("File"))
   {
-    if (ImGui::MenuItem("Speichern", "Strg+S", false, course_.has_value()))
+    if (ImGui::MenuItem("Save", "Ctrl+S", false, course_.has_value()))
       Save();
-    if (ImGui::MenuItem("Im Spiel testen", "F5", false, course_.has_value()))
+    if (ImGui::MenuItem("Test in game", "F5", false, course_.has_value()))
       Launch();
     ImGui::Separator();
-    if (ImGui::MenuItem("Kurs auf Original zurücksetzen", nullptr, false, course_.has_value()))
+    if (ImGui::MenuItem("Revert course to original", nullptr, false, course_.has_value()))
     {
       std::string msg;
       const bool ok = project_.RestoreCourse(course_id_, msg);
@@ -850,50 +850,50 @@ void Editor::DrawMenu()
       RefreshCourses();
       OpenCourse(course_id_);
     }
-    if (ImGui::MenuItem("Einstellungen…"))
+    if (ImGui::MenuItem("Settings…"))
       show_settings_ = true;
     ImGui::Separator();
-    if (ImGui::MenuItem("Beenden"))
+    if (ImGui::MenuItem("Quit"))
       RequestQuit();
     ImGui::EndMenu();
   }
-  if (ImGui::BeginMenu("Bearbeiten"))
+  if (ImGui::BeginMenu("Edit"))
   {
-    if (ImGui::MenuItem("Rückgängig", "Strg+Z", false, !undo_.empty()))
+    if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undo_.empty()))
       Undo();
-    if (ImGui::MenuItem("Wiederholen", "Strg+Y", false, !redo_.empty()))
+    if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redo_.empty()))
       Redo();
     ImGui::EndMenu();
   }
-  if (ImGui::BeginMenu("Ansicht"))
+  if (ImGui::BeginMenu("View"))
   {
-    ImGui::MenuItem("Modelle", nullptr, &show_models_);
-    ImGui::MenuItem("Hintergrund (Boden/Himmel)", nullptr, &show_background_);
-    ImGui::MenuItem("Platzhalter (fehlende/animierte Modelle)", nullptr, &show_missing_);
-    ImGui::MenuItem("Streckenverlauf (Checkpoints)", nullptr, &show_track_);
-    ImGui::MenuItem("Kollision (statisch, gelb = Boost)", nullptr, &show_collision_);
+    ImGui::MenuItem("Models", nullptr, &show_models_);
+    ImGui::MenuItem("Background (ground/sky)", nullptr, &show_background_);
+    ImGui::MenuItem("Placeholders (missing/animated models)", nullptr, &show_missing_);
+    ImGui::MenuItem("Track path (checkpoints)", nullptr, &show_track_);
+    ImGui::MenuItem("Collision (static, yellow = boost)", nullptr, &show_collision_);
     ImGui::Separator();
-    if (ImGui::MenuItem("Ganzen Kurs zeigen"))
+    if (ImGui::MenuItem("Frame whole course"))
       FrameCourse();
-    if (ImGui::MenuItem("Auswahl fokussieren", "F", false, selected_ >= 0))
+    if (ImGui::MenuItem("Focus selection", "F", false, selected_ >= 0))
       FocusSelection();
     ImGui::EndMenu();
   }
-  if (ImGui::BeginMenu("Hilfe"))
+  if (ImGui::BeginMenu("Help"))
   {
     ImGui::TextUnformatted(
-        "Kamera:  rechte Maustaste halten + WASD/QE fliegen, Mausrad = Tempo\n"
-        "         Mausrad = vor/zurück, mittlere Maustaste = schieben\n"
-        "Auswahl: Linksklick im 3D-Fenster oder in der Objektliste\n"
-        "Gizmo:   W verschieben, E drehen, R skalieren, F fokussieren\n"
-        "Datei:   Strg+S speichern (in den Mod-Ordner), F5 im Spiel testen\n\n"
-        "Hinweis: Straßenmodelle sind nur Optik. Fahrbahn und Physik kommen\n"
-        "aus dem Track-Spline (gelbe Linie) und werden noch nicht bearbeitet.");
+        "Camera:    hold right mouse button + WASD/QE to fly, mouse wheel = speed\n"
+        "           mouse wheel = forward/back, middle mouse button = pan\n"
+        "Selection: left click in the 3D view or in the object list\n"
+        "Gizmo:     W move, E rotate, R scale, F focus\n"
+        "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
+        "Note: road models are visuals only. The driving surface and physics come\n"
+        "from the track spline (yellow line), which cannot be edited yet.");
     ImGui::EndMenu();
   }
   ImGui::SameLine(ImGui::GetWindowWidth() - 360);
   if (course_)
-    ImGui::TextDisabled("%s  |  %s", Project::CourseFile(course_id_).c_str(), dirty_ ? "ungespeichert *" : "gespeichert");
+    ImGui::TextDisabled("%s  |  %s", Project::CourseFile(course_id_).c_str(), dirty_ ? "unsaved *" : "saved");
   ImGui::EndMainMenuBar();
 }
 
@@ -903,13 +903,13 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
   ImGui::SetNextWindowSize({w, h});
   ImGui::Begin("##left", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-  ImGui::SeparatorText("Kurse");
+  ImGui::SeparatorText("Courses");
   if (ImGui::BeginListBox("##courses", {-1, std::min(220.0f, h * 0.35f)}))
   {
     for (const auto& c : courses_)
     {
       char label[64];
-      std::snprintf(label, sizeof label, "%s Kurs %02d", c.modified ? "*" : " ", c.id);
+      std::snprintf(label, sizeof label, "%s Course %02d", c.modified ? "*" : " ", c.id);
       if (ImGui::Selectable(label, c.id == course_id_) && c.id != course_id_)
       {
         if (dirty_)
@@ -920,17 +920,17 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
     }
     ImGui::EndListBox();
   }
-  ImGui::TextDisabled("* = im Mod-Ordner geändert");
+  ImGui::TextDisabled("* = changed in the mod folder");
 
-  ImGui::SeparatorText("Objekte");
+  ImGui::SeparatorText("Objects");
   if (!course_)
   {
-    ImGui::TextDisabled("Kein Kurs geladen.");
+    ImGui::TextDisabled("No course loaded.");
     ImGui::End();
     return;
   }
   ImGui::SetNextItemWidth(-1);
-  ImGui::InputTextWithHint("##filter", "Filter (Name)…", &filter_);
+  ImGui::InputTextWithHint("##filter", "Filter (name)…", &filter_);
   std::string needle = filter_;
   std::transform(needle.begin(), needle.end(), needle.begin(), ::toupper);
   std::vector<int> rows;
@@ -938,7 +938,7 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
   for (int i = 0; i < int(list.size()); ++i)
     if (needle.empty() || list[i].name.find(needle) != std::string::npos)
       rows.push_back(i);
-  ImGui::TextDisabled("%zu von %zu", rows.size(), list.size());
+  ImGui::TextDisabled("%zu of %zu", rows.size(), list.size());
   ImGui::BeginChild("##objects", {-1, -1}, ImGuiChildFlags_Borders);
   ImGuiListClipper clip;
   clip.Begin(int(rows.size()));
@@ -955,7 +955,7 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
       const auto& in = list[i];
       const GpuMesh& g = gpu_[in.name];
       char label[160];
-      std::snprintf(label, sizeof label, "%4d  %s%s", i, in.name.empty() ? "(ohne Name)" : in.name.c_str(),
+      std::snprintf(label, sizeof label, "%4d  %s%s", i, in.name.empty() ? "(unnamed)" : in.name.c_str(),
                     Modified(i) ? "  *" : "");
       if (!g.count)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1));
@@ -982,22 +982,22 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   ImGui::SetNextWindowSize({w, h});
   ImGui::Begin("##right", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-  ImGui::SeparatorText("Werkzeug");
-  ImGui::RadioButton("Verschieben (W)", &gizmo_op_, 0);
-  ImGui::RadioButton("Drehen (E)", &gizmo_op_, 1);
-  ImGui::RadioButton("Skalieren (R)", &gizmo_op_, 2);
-  ImGui::Checkbox("Lokale Achsen", &gizmo_local_);
-  ImGui::Checkbox("Raster", &snap_);
+  ImGui::SeparatorText("Tool");
+  ImGui::RadioButton("Move (W)", &gizmo_op_, 0);
+  ImGui::RadioButton("Rotate (E)", &gizmo_op_, 1);
+  ImGui::RadioButton("Scale (R)", &gizmo_op_, 2);
+  ImGui::Checkbox("Local axes", &gizmo_local_);
+  ImGui::Checkbox("Snap", &snap_);
   if (snap_)
   {
     ImGui::SetNextItemWidth(100);
-    ImGui::DragFloat("Schritt", gizmo_op_ == 0 ? &snap_move_ : gizmo_op_ == 1 ? &snap_rot_ : &snap_scale_, 0.1f, 0.01f, 1000);
+    ImGui::DragFloat("Step", gizmo_op_ == 0 ? &snap_move_ : gizmo_op_ == 1 ? &snap_rot_ : &snap_scale_, 0.1f, 0.01f, 1000);
   }
 
-  ImGui::SeparatorText("Objekt");
+  ImGui::SeparatorText("Object");
   if (!course_ || selected_ < 0)
   {
-    ImGui::TextDisabled("Nichts ausgewählt.\nLinksklick im 3D-Fenster\noder in der Objektliste.");
+    ImGui::TextDisabled("Nothing selected.\nLeft click in the 3D view\nor in the object list.");
     ImGui::End();
     return;
   }
@@ -1006,13 +1006,13 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   ImGui::TextDisabled("Offset 0x%05X  Flags 0x%08X", in.offset, in.flags);
   const ModelMesh* m = models_->Find(in.name);
   if (!m)
-    ImGui::TextColored({1, 0.5f, 0.4f, 1}, "Modell nicht gefunden (Platzhalter)");
+    ImGui::TextColored({1, 0.5f, 0.4f, 1}, "Model not found (placeholder)");
   else if (m->skinned)
-    ImGui::TextColored({0.5f, 0.8f, 1, 1}, "Animiertes/Skin-Modell (nur Box)");
+    ImGui::TextColored({0.5f, 0.8f, 1, 1}, "Animated/skinned model (box only)");
   else
-    ImGui::TextDisabled("%zu Dreiecke", m->positions.size() / 3);
+    ImGui::TextDisabled("%zu triangles", m->positions.size() / 3);
   if (!in.matrix_offset)
-    ImGui::TextColored({1, 0.8f, 0.3f, 1}, "Keine Matrix: Spiel nutzt eigene Logik,\nÄnderungen evtl. ohne Wirkung.");
+    ImGui::TextColored({1, 0.8f, 0.3f, 1}, "No matrix: the game uses its own logic,\nchanges may have no effect.");
 
   Transform t = Get(selected_);
   Vec3 rot_deg = {AngleToDeg(t.rotation[0]), AngleToDeg(t.rotation[1]), AngleToDeg(t.rotation[2])};
@@ -1029,7 +1029,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   if (uniform)
   {
     float s = t.scale[0];
-    if (ImGui::DragFloat("Skalierung", &s, 0.01f, 0.001f, 1000, "%.3f"))
+    if (ImGui::DragFloat("Scale", &s, 0.01f, 0.001f, 1000, "%.3f"))
     {
       const float f = t.scale[0] != 0 ? s / t.scale[0] : 1;
       for (auto& v : t.scale)
@@ -1040,9 +1040,9 @@ void Editor::DrawInspector(float x, float y, float w, float h)
     deactivated |= ImGui::IsItemDeactivatedAfterEdit();
   }
   else
-    track(ImGui::DragFloat3("Skalierung", t.scale.data(), 0.01f, 0.001f, 1000, "%.3f"));
+    track(ImGui::DragFloat3("Scale", t.scale.data(), 0.01f, 0.001f, 1000, "%.3f"));
   ImGui::PopItemWidth();
-  ImGui::Checkbox("Gleichmäßig skalieren", &uniform);
+  ImGui::Checkbox("Uniform scale", &uniform);
 
   if (activated)
     BeginEdit();
@@ -1057,8 +1057,8 @@ void Editor::DrawInspector(float x, float y, float w, float h)
 
   // Linked objects (e.g. dash plate + arrow marker + ring) move together.
   const std::vector<int> linked = Linked(selected_);
-  ImGui::Checkbox("Verknüpfte Objekte mitbewegen", &link_);
-  ImGui::Checkbox("Kollision/Boost-Flächen mitbewegen", &move_collision_);
+  ImGui::Checkbox("Move linked objects along", &link_);
+  ImGui::Checkbox("Move collision/boost areas along", &move_collision_);
   {
     std::vector<int> members = linked;
     members.push_back(selected_);
@@ -1075,9 +1075,9 @@ void Editor::DrawInspector(float x, float y, float w, float h)
         CellsCovered(course_->grid(), poly, &o);
         outside |= o;
       }
-      ImGui::TextColored({1, 0.85f, 0.3f, 1}, "%zu Kollisionsflächen hängen dran (%d Boost)", attached.size(), dash);
+      ImGui::TextColored({1, 0.85f, 0.3f, 1}, "%zu collision polygons attached (%d boost)", attached.size(), dash);
       if (outside)
-        ImGui::TextColored({1, 0.45f, 0.4f, 1}, "Achtung: Fläche liegt außerhalb des\nKollisionsgitters, wirkt dort evtl. nicht.");
+        ImGui::TextColored({1, 0.45f, 0.4f, 1}, "Warning: polygon extends outside the\ncollision grid, may not work there.");
     }
   }
   if (link_)
@@ -1085,7 +1085,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
     ImGui::SetNextItemWidth(120);
     ImGui::DragFloat("Radius", &link_radius_, 1, 1, 500, "%.0f");
     if (linked.empty())
-      ImGui::TextDisabled("Keine verknüpften Objekte.");
+      ImGui::TextDisabled("No linked objects.");
     for (int j : linked)
     {
       ImGui::PushID(j);
@@ -1101,7 +1101,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
 
   ImGui::Spacing();
-  if (ImGui::Button("Vor die Kamera holen"))
+  if (ImGui::Button("Bring in front of camera"))
   {
     // Moves the object 300 units in front of the camera.
     Transform n = Get(selected_);
@@ -1116,7 +1116,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   for (int j : linked)
     any_modified |= Modified(j);
   ImGui::BeginDisabled(!any_modified);
-  if (ImGui::Button(linked.empty() ? "Objekt zurücksetzen" : "Objekt + Verknüpfte zurücksetzen"))
+  if (ImGui::Button(linked.empty() ? "Reset object" : "Reset object + linked"))
   {
     BeginEdit();
     for (const auto& [i, before] : edit_snapshot_)
@@ -1127,16 +1127,16 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
   ImGui::EndDisabled();
 
-  ImGui::SeparatorText("Kurs");
-  ImGui::Text("Kurs %02d  %s", course_id_, venue_.c_str());
-  ImGui::TextDisabled("%zu Objekte, %zu Checkpoints", course_->instances().size(), course_->checkpoints().size());
+  ImGui::SeparatorText("Course");
+  ImGui::Text("Course %02d  %s", course_id_, venue_.c_str());
+  ImGui::TextDisabled("%zu objects, %zu checkpoints", course_->instances().size(), course_->checkpoints().size());
   int changed_count = 0;
   for (int i = 0; i < int(course_->instances().size()); ++i)
     changed_count += Modified(i);
-  ImGui::Text("Geänderte Objekte: %d", changed_count);
-  if (ImGui::Button("Speichern", {-1, 0}))
+  ImGui::Text("Changed objects: %d", changed_count);
+  if (ImGui::Button("Save", {-1, 0}))
     Save();
-  if (ImGui::Button("Im Spiel testen (F5)", {-1, 0}))
+  if (ImGui::Button("Test in game (F5)", {-1, 0}))
     Launch();
   ImGui::End();
 }
@@ -1161,50 +1161,50 @@ void Editor::DrawSettings()
     return;
   ImGui::SetNextWindowSize({620, 0}, ImGuiCond_Appearing);
   ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
-  if (!ImGui::Begin("Einstellungen", &show_settings_))
+  if (!ImGui::Begin("Settings", &show_settings_))
   {
     ImGui::End();
     return;
   }
   Settings& s = project_.settings();
   std::string rom = s.rom.string(), app = s.glinux_appimage.string(), user = s.glinux_user_dir.string();
-  ImGui::TextDisabled("Arbeitsordner: %s", s.workspace.string().c_str());
-  ImGui::SeparatorText("Spiel");
+  ImGui::TextDisabled("Workspace: %s", s.workspace.string().c_str());
+  ImGui::SeparatorText("Game");
   if (ImGui::InputText("ROM (RVZ/ISO)", &rom))
     s.rom = rom;
-  ImGui::Text("Disc: %s", project_.DiscReady() ? "extrahiert" : "fehlt");
-  if (ImGui::Button("Disc aus ROM extrahieren"))
+  ImGui::Text("Disc: %s", project_.DiscReady() ? "extracted" : "missing");
+  if (ImGui::Button("Extract disc from ROM"))
   {
     std::string msg;
     const bool ok = project_.ExtractDisc(msg);
-    Status(ok ? "Extraktion läuft im Hintergrund, danach \"Kursliste neu laden\". " + msg : msg, !ok);
+    Status(ok ? "Extracting in the background, then use \"Reload course list\". " + msg : msg, !ok);
   }
   ImGui::SameLine();
-  if (ImGui::Button("Kursliste neu laden"))
+  if (ImGui::Button("Reload course list"))
   {
     RefreshCourses();
     if (!course_ && !courses_.empty())
       OpenCourse(courses_.front().id);
   }
-  ImGui::SeparatorText("Testen");
+  ImGui::SeparatorText("Testing");
   int mode = s.launcher == "dolphin" ? 1 : 0;
   ImGui::RadioButton("F-ZERO GLINUX", &mode, 0);
   ImGui::SameLine();
   ImGui::RadioButton("Dolphin (Flatpak)", &mode, 1);
   s.launcher = mode ? "dolphin" : "glinux";
   ImGui::BeginDisabled(mode != 0);
-  ImGui::Checkbox("Direkt in den Kurs starten (Practice, ohne Menüs)", &s.quickstart);
+  ImGui::Checkbox("Start directly in the course (Practice, no menus)", &s.quickstart);
   ImGui::EndDisabled();
   if (ImGui::InputText("GLINUX AppImage", &app))
     s.glinux_appimage = app;
-  if (ImGui::InputText("GLINUX Benutzerordner", &user))
+  if (ImGui::InputText("GLINUX user folder", &user))
     s.glinux_user_dir = user;
-  ImGui::TextDisabled("Mod-Ordner: %s", s.mod().string().c_str());
+  ImGui::TextDisabled("Mod folder: %s", s.mod().string().c_str());
   ImGui::Spacing();
-  if (ImGui::Button("Übernehmen und speichern"))
+  if (ImGui::Button("Apply and save"))
   {
     s.Save();
-    Status("Einstellungen gespeichert: " + s.file().string());
+    Status("Settings saved: " + s.file().string());
   }
   ImGui::End();
 }
@@ -1212,13 +1212,13 @@ void Editor::DrawSettings()
 void Editor::DrawPopups()
 {
   if (pending_course_ >= 0)
-    ImGui::OpenPopup("Ungespeicherte Änderungen");
+    ImGui::OpenPopup("Unsaved changes");
   if (confirm_quit_)
-    ImGui::OpenPopup("Beenden?");
-  if (ImGui::BeginPopupModal("Ungespeicherte Änderungen", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    ImGui::OpenPopup("Quit?");
+  if (ImGui::BeginPopupModal("Unsaved changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
   {
-    ImGui::Text("Kurs %02d hat ungespeicherte Änderungen.", course_id_);
-    if (ImGui::Button("Speichern"))
+    ImGui::Text("Course %02d has unsaved changes.", course_id_);
+    if (ImGui::Button("Save"))
     {
       if (Save())
         OpenCourse(pending_course_);
@@ -1226,34 +1226,34 @@ void Editor::DrawPopups()
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Verwerfen"))
+    if (ImGui::Button("Discard"))
     {
       OpenCourse(pending_course_);
       pending_course_ = -1;
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Abbrechen"))
+    if (ImGui::Button("Cancel"))
     {
       pending_course_ = -1;
       ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
   }
-  if (ImGui::BeginPopupModal("Beenden?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  if (ImGui::BeginPopupModal("Quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
   {
-    ImGui::Text("Es gibt ungespeicherte Änderungen.");
-    if (ImGui::Button("Speichern und beenden"))
+    ImGui::Text("There are unsaved changes.");
+    if (ImGui::Button("Save and quit"))
     {
       quit_ = Save();
       confirm_quit_ = false;
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Verwerfen"))
+    if (ImGui::Button("Discard"))
       quit_ = true;
     ImGui::SameLine();
-    if (ImGui::Button("Abbrechen"))
+    if (ImGui::Button("Cancel"))
     {
       confirm_quit_ = false;
       ImGui::CloseCurrentPopup();

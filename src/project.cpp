@@ -48,10 +48,10 @@ bool Spawn(const std::vector<std::string>& args, const fs::path& log, std::strin
   posix_spawnattr_destroy(&attr);
   if (rc != 0)
   {
-    message = "Start fehlgeschlagen: " + args[0];
+    message = "Failed to start: " + args[0];
     return false;
   }
-  message = "Gestartet, Log: " + log.string();
+  message = "Started, log: " + log.string();
   return true;
 }
 }  // namespace
@@ -138,7 +138,7 @@ Course Project::LoadCourse(int id) const
   if (!fs::exists(path))
     path = settings_.disc() / "files" / "stage" / name;
   auto raw = ReadFile(path);
-  Check(raw.has_value(), "Kursdatei nicht lesbar");
+  Check(raw.has_value(), "course file not readable");
   return Course::Parse(LzDecompress(*raw));
 }
 
@@ -204,7 +204,7 @@ bool Project::EnsureMod(std::string& message)
     return true;
   if (!DiscReady())
   {
-    message = "Disc ist nicht extrahiert.";
+    message = "The disc has not been extracted.";
     return false;
   }
   std::error_code ec;
@@ -215,14 +215,14 @@ bool Project::EnsureMod(std::string& message)
   const char* argv[] = {"cp", "-a", "--reflink=auto", src.c_str(), dst.c_str(), nullptr};
   if (posix_spawnp(&pid, "cp", nullptr, nullptr, const_cast<char**>(argv), environ) != 0)
   {
-    message = "cp konnte nicht gestartet werden.";
+    message = "Could not run cp.";
     return false;
   }
   int status = 0;
   waitpid(pid, &status, 0);
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
   {
-    message = "Kopieren der Disc in den Mod-Ordner fehlgeschlagen.";
+    message = "Copying the disc into the mod folder failed.";
     return false;
   }
   return true;
@@ -236,16 +236,16 @@ bool Project::SaveCourse(int id, const Course& course, std::string& message)
   const Bytes packed = LzCompress(raw);
   if (LzDecompress(packed) != raw)
   {
-    message = "Interner Fehler: Kompression nicht verlustfrei, nichts gespeichert.";
+    message = "Internal error: compression was not lossless, nothing saved.";
     return false;
   }
   const fs::path out = settings_.mod() / "files" / "stage" / CourseFile(id);
   if (!WriteFileAtomic(out, packed))
   {
-    message = "Schreiben fehlgeschlagen: " + out.string();
+    message = "Write failed: " + out.string();
     return false;
   }
-  message = "Gespeichert: " + out.string();
+  message = "Saved: " + out.string();
   return true;
 }
 
@@ -255,15 +255,15 @@ bool Project::RestoreCourse(int id, std::string& message)
   auto orig = ReadFile(settings_.disc() / "files" / "stage" / CourseFile(id));
   if (!orig || !fs::exists(settings_.mod()))
   {
-    message = "Nichts wiederherzustellen.";
+    message = "Nothing to revert.";
     return false;
   }
   if (!WriteFileAtomic(out, *orig))
   {
-    message = "Schreiben fehlgeschlagen.";
+    message = "Write failed.";
     return false;
   }
-  message = "Original wiederhergestellt.";
+  message = "Original restored.";
   return true;
 }
 
@@ -284,7 +284,7 @@ bool Project::ExtractDisc(std::string& message)
 {
   if (settings_.rom.empty() || !fs::exists(settings_.rom))
   {
-    message = "ROM-Pfad fehlt oder existiert nicht.";
+    message = "ROM path is empty or does not exist.";
     return false;
   }
   const fs::path script = ScriptsDir() / "extract-disc.sh";

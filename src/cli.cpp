@@ -100,13 +100,59 @@ static int SelfTest(const fs::path& workspace)
         }
       }
     }
-    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f;
+    // Add a copied object and a copied collision polygon, save, re-parse.
+    bool add_ok = true;
+    if (!course.instances().empty())
+    {
+      Course c = course;
+      const int src = int(c.instances().size()) / 2;
+      const int a = c.AddInstance(src);
+      auto& in = c.instances()[a];
+      in.position = {in.position[0] + 50, in.position[1] + 5, in.position[2] - 30};
+      in.matrix = ComposeMatrix(in.position, in.rotation, in.scale);
+      const int gone = c.AddInstance(src);
+      c.instances()[gone].removed = true;
+      int pa = -1;
+      // First polygon that still lies inside the collision grid after the shift.
+      for (int k = 0; k < int(c.polys().size()) && pa < 0; ++k)
+      {
+        StaticPoly shifted = c.polys()[k];
+        for (auto& v : shifted.v)
+          v[0] += 20;
+        bool outside = false;
+        if (CellsCovered(c.grid(), shifted, &outside).empty() || outside || shifted.surfaces.empty())
+          continue;
+        pa = c.AddPoly(k);
+        c.polys()[pa].v = shifted.v;
+      }
+      const Course re = Course::Parse(c.Serialize());
+      add_ok = re.instances().size() == course.instances().size() + 1;
+      if (add_ok)
+      {
+        const auto& r = re.instances().back();
+        add_ok = r.name == in.name && r.position == in.position && r.rotation == in.rotation &&
+                 r.HasMatrix() == in.HasMatrix() && (!r.matrix_offset || r.matrix == in.matrix) &&
+                 r.flags == course.instances()[src].flags;
+        for (std::size_t k = 0; k < course.instances().size() && add_ok; ++k)
+          add_ok = re.instances()[k].position == course.instances()[k].position &&
+                   re.instances()[k].name == course.instances()[k].name;
+      }
+      if (add_ok && pa >= 0)
+      {
+        const auto& want = c.polys()[pa];
+        bool found = false;
+        for (const auto& p : re.polys())
+          found |= p.quad == want.quad && p.v == want.v && p.surfaces == want.surfaces;
+        add_ok = found && re.polys().size() == course.polys().size() + 1;
+      }
+    }
+    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f && add_ok;
     failures += !ok;
-    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e lz %6zu->%6zu %lldms\n",
+    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e add=%s lz %6zu->%6zu %lldms\n",
                 ok ? "OK  " : "FAIL", Project::CourseFile(info.id).c_str(), venue.c_str(),
                 course.instances().size(), with_matrix, animated, shared, max_err, found,
                 course.instances().size(), skinned, empty, tris, course.checkpoints().size(),
-                course.collision().triangles.size() / 3, poly_err, raw.size(), packed.size(), (long long)ms);
+                course.collision().triangles.size() / 3, poly_err, add_ok ? "ok" : "FAIL", raw.size(), packed.size(), (long long)ms);
   }
   std::printf("lz total: original %zu, ours %zu bytes\n", total_in, total_out);
   return failures ? 1 : 0;

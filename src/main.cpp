@@ -82,10 +82,10 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures]:
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S]:
   // render, save, quit (for testing and documentation).
   std::string screenshot;
-  int start_course = -1, start_select = -1;
+  int start_course = -1, start_select = -1, start_place = -1;
   bool start_collision = false, no_textures = false;
   for (int i = 1; i < argc; ++i)
   {
@@ -98,6 +98,8 @@ int main(int argc, char** argv)
       start_course = std::atoi(argv[++i]);
     else if (a == "--select" && i + 1 < argc)
       start_select = std::atoi(argv[++i]);
+    else if (a == "--place" && i + 1 < argc)
+      start_place = std::atoi(argv[++i]);  // place structure S next to its original, select it
     else if (a == "--collision")
       start_collision = true;
     else if (a == "--no-textures")
@@ -169,7 +171,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  editor.DebugStart(start_course, start_select, start_collision);
+  editor.DebugStart(start_course, start_select, start_collision, start_place);
   int frame = 0;
   Uint64 last = SDL_GetTicksNS();
   while (!editor.WantsQuit())

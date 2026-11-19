@@ -15,6 +15,7 @@ constexpr std::size_t kTrackNodes = 0x08;        // count, ptr  (0x0C bytes each
 constexpr std::size_t kStaticCollider = 0x1C;    // ptr
 constexpr std::size_t kInstanceCount = 0x48;     // count
 constexpr std::size_t kInstancePtr = 0x54;       // ptr (0x40 bytes each)
+constexpr std::size_t kSceneObjects = 0x64;      // count, ptr (0x10 bytes each)
 constexpr int kSurfaceTypes = 14;
 
 Vec3 ReadVec3(const Bytes& d, std::size_t o) { return {F32(d, o), F32(d, o + 4), F32(d, o + 8)}; }
@@ -132,6 +133,22 @@ Course Course::Parse(Bytes data)
   for (auto& in : c.instances_)
     in.shared_matrix = in.matrix_offset && matrix_users[in.matrix_offset] > 1;
 
+  // --- Scene objects (model references) -------------------------------------
+  const std::uint32_t so_count = U32(d, kSceneObjects);
+  const std::uint32_t so_base = U32(d, kSceneObjects + 4);
+  if (so_count < 10000 && ValidPtr(d, so_base, std::size_t(so_count) * 0x10))
+    for (std::uint32_t i = 0; i < so_count; ++i)
+    {
+      SceneObjectRef so;
+      so.offset = so_base + i * 0x10;
+      const std::uint32_t lod_count = U32(d, so.offset + 0x04);
+      const std::uint32_t lods = U32(d, so.offset + 0x08);
+      if (lod_count > 0 && ValidPtr(d, lods, 0x10))
+        if (const std::uint32_t name = U32(d, lods + 0x04); ValidPtr(d, name, 1))
+          so.name = CString(d, name);
+      c.scene_objects_.push_back(std::move(so));
+    }
+
   // --- Track checkpoints (centre line + width) ------------------------------
   const std::uint32_t node_count = U32(d, kTrackNodes);
   const std::uint32_t nodes = U32(d, kTrackNodes + 4);
@@ -161,6 +178,7 @@ Course Course::Parse(Bytes data)
   const std::uint32_t sc = U32(d, kStaticCollider);
   if (ValidPtr(d, sc, 0xB4))
   {
+    c.static_collider_ = sc;
     CollisionGrid& g = c.grid_;
     g.min_x = F32(d, sc + 0x60);
     g.min_z = F32(d, sc + 0x64);
@@ -227,6 +245,8 @@ void Course::RebuildCollision()
   for (int i = 0; i < int(polys_.size()); ++i)
   {
     const auto& p = polys_[i];
+    if (p.removed)
+      continue;
     const int surf = p.surfaces.empty() ? 0 : p.surfaces.front();
     collision_.triangles.insert(collision_.triangles.end(), {p.v[0], p.v[1], p.v[2]});
     collision_.surface.push_back(surf);
@@ -240,8 +260,45 @@ void Course::RebuildCollision()
   }
 }
 
+int Course::AddInstance(int source)
+{
+  const SceneInstance& src = instances_.at(std::size_t(source));
+  SceneInstance in = src;
+  if (src.added)
+    in.raw = src.raw;
+  else
+    std::copy_n(data_.begin() + src.offset, 0x40, in.raw.begin());
+  in.added = true;
+  in.removed = false;
+  in.own_matrix = src.HasMatrix();
+  in.offset = 0;
+  in.matrix_offset = 0;
+  in.shared_matrix = false;
+  instances_.push_back(std::move(in));
+  return int(instances_.size()) - 1;
+}
+
+int Course::AddPoly(int source)
+{
+  StaticPoly p = polys_.at(std::size_t(source));
+  p.added = true;
+  p.removed = false;
+  p.modified = false;
+  p.cells.clear();
+  p.offset = 0;
+  p.index = -1;
+  polys_.push_back(std::move(p));
+  return int(polys_.size()) - 1;
+}
+
 namespace
 {
+void Align(Bytes& out, std::size_t a)
+{
+  while (out.size() % a)
+    out.push_back(0);
+}
+
 Vec3 Sub(const Vec3& a, const Vec3& b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
 Vec3 Cross(const Vec3& a, const Vec3& b)
 {
@@ -299,12 +356,51 @@ std::vector<int> CellsCovered(const CollisionGrid& g, const StaticPoly& p, bool*
 Bytes Course::Serialize() const
 {
   Bytes out = data_;
-  // Collision polygons that were moved: new geometry + grid references for
-  // every cell they now cover. New index lists are appended to the file.
-  std::map<std::pair<std::uint32_t, int>, std::vector<std::uint16_t>> additions;  // (cell ptr slot) -> indices
-  for (const auto& p : polys_)
+  std::vector<StaticPoly> polys = polys_;
+  // Added collision polygons: copy the whole triangle/quad array to the end of
+  // the file and append the new ones (polygons are only reached through the
+  // grid index lists, the arrays have no count).
+  for (const bool quad : {false, true})
   {
-    if (!p.modified)
+    int max_index = -1, n_added = 0;
+    for (const auto& p : polys)
+    {
+      if (p.quad != quad || p.removed)
+        continue;
+      if (p.added)
+        ++n_added;
+      else
+        max_index = std::max(max_index, p.index);
+    }
+    if (!n_added || !static_collider_)
+      continue;
+    const std::size_t stride = quad ? 0x70 : 0x58;
+    const std::uint32_t slot = static_collider_ + (quad ? 0x78 : 0x24);
+    const std::uint32_t old_base = U32(out, slot);
+    Align(out, 0x20);
+    const std::uint32_t base = std::uint32_t(out.size());
+    out.resize(out.size() + std::size_t(max_index + 1 + n_added) * stride);
+    if (old_base && max_index >= 0)
+      std::copy_n(out.begin() + old_base, std::size_t(max_index + 1) * stride, out.begin() + base);
+    PutU32(out, slot, base);
+    int next = max_index + 1;
+    for (auto& p : polys)
+    {
+      if (p.quad != quad || p.removed)
+        continue;
+      if (p.added)
+        p.index = next++;
+      p.offset = base + std::uint32_t(p.index) * std::uint32_t(stride);
+    }
+    Check(next < 0xFFFF, "coli: too many collision polygons");
+  }
+
+  // Polygons that were moved or added: new geometry + grid references for
+  // every cell they now cover. New index lists are appended to the file.
+  std::map<std::uint32_t, std::vector<std::uint16_t>> additions;  // cell pointer slot -> indices
+  for (const auto& p : polys)
+  {
+    if (p.removed || !(p.modified || p.added))
       continue;
     WritePoly(out, p);
     for (int cell : CellsCovered(grid_, p, nullptr))
@@ -316,14 +412,14 @@ Bytes Course::Serialize() const
         const std::uint32_t table = U32(data_, (p.quad ? grid_.quad_tables : grid_.tri_tables) + 4 * s);
         if (!table)
           continue;
-        additions[{table + 4 * std::uint32_t(cell), 0}].push_back(std::uint16_t(p.index));
+        additions[table + 4 * std::uint32_t(cell)].push_back(std::uint16_t(p.index));
       }
     }
   }
   for (auto& [slot, extra] : additions)
   {
     std::vector<std::uint16_t> list;
-    std::uint32_t old = U32(out, slot.first);
+    std::uint32_t old = U32(out, slot);
     for (int guard = 0; old && guard < 65536 && old + 2 <= out.size(); ++guard, old += 2)
     {
       const std::uint16_t idx = U16(out, old);
@@ -335,28 +431,67 @@ Bytes Course::Serialize() const
       if (std::find(list.begin(), list.end(), i) == list.end())
         list.push_back(i);
     list.push_back(0xFFFF);
-    while (out.size() % 4)
-      out.push_back(0);
+    Align(out, 4);
     const std::uint32_t at = std::uint32_t(out.size());
     out.resize(out.size() + list.size() * 2);
     for (std::size_t k = 0; k < list.size(); ++k)
       PutU16(out, at + 2 * k, list[k]);
-    PutU32(out, slot.first, at);
+    PutU32(out, slot, at);
   }
   if (!additions.empty())
-    while (out.size() % 4)
-      out.push_back(0);
-  for (const auto& in : instances_)
-  {
+    Align(out, 4);
+
+  auto write_fields = [&](std::uint32_t o, const SceneInstance& in) {
     for (int k = 0; k < 3; ++k)
     {
-      PutF32(out, in.offset + 0x0C + 4 * k, in.position[k]);
-      PutU16(out, in.offset + 0x18 + 2 * k, std::uint16_t(in.rotation[k]));
-      PutF32(out, in.offset + 0x20 + 4 * k, in.scale[k]);
+      PutF32(out, o + 0x0C + 4 * k, in.position[k]);
+      PutU16(out, o + 0x18 + 2 * k, std::uint16_t(in.rotation[k]));
+      PutF32(out, o + 0x20 + 4 * k, in.scale[k]);
     }
+  };
+  std::vector<const SceneInstance*> added;
+  for (const auto& in : instances_)
+  {
+    if (in.added)
+    {
+      if (!in.removed)
+        added.push_back(&in);
+      continue;
+    }
+    write_fields(in.offset, in);
     if (in.matrix_offset)
       for (int k = 0; k < 12; ++k)
         PutF32(out, in.matrix_offset + 4 * k, in.matrix[k]);
+  }
+  if (!added.empty())
+  {
+    // Relocated instance table: the original entries followed by the new ones.
+    const std::uint32_t count = U32(data_, kInstanceCount);
+    const std::uint32_t old_base = U32(data_, kInstancePtr);
+    Align(out, 0x20);
+    const std::uint32_t base = std::uint32_t(out.size());
+    out.resize(out.size() + std::size_t(count + added.size()) * 0x40);
+    std::copy_n(out.begin() + old_base, std::size_t(count) * 0x40, out.begin() + base);
+    for (std::size_t k = 0; k < added.size(); ++k)
+    {
+      const std::uint32_t o = base + std::uint32_t(count + k) * 0x40;
+      std::copy(added[k]->raw.begin(), added[k]->raw.end(), out.begin() + o);
+      write_fields(o, *added[k]);
+      PutU32(out, o + 0x3C, 0);
+    }
+    for (std::size_t k = 0; k < added.size(); ++k)
+    {
+      if (!added[k]->own_matrix)
+        continue;
+      const std::uint32_t m = std::uint32_t(out.size());
+      out.resize(out.size() + 0x30);
+      for (int j = 0; j < 12; ++j)
+        PutF32(out, m + 4 * j, added[k]->matrix[j]);
+      PutU32(out, base + std::uint32_t(count + k) * 0x40 + 0x3C, m);
+    }
+    Align(out, 0x20);
+    PutU32(out, kInstanceCount, count + std::uint32_t(added.size()));
+    PutU32(out, kInstancePtr, base);
   }
   return out;
 }

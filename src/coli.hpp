@@ -30,6 +30,21 @@ struct SceneInstance
   Mat34 matrix{};
   bool animated = false;            // pointer at 0x2C set (meaning not verified yet)
   bool shared_matrix = false;       // matrix pointer is used by another instance too
+  // Instances added in the editor: raw 0x40 bytes of the template they were
+  // copied from, written into a relocated instance table on save.
+  bool added = false;
+  bool removed = false;             // added, then deleted again (kept for undo)
+  bool own_matrix = false;          // added instance gets its own 3x4 matrix
+  std::array<std::uint8_t, 0x40> raw{};
+  bool HasMatrix() const { return matrix_offset != 0 || own_matrix; }
+};
+
+// Scene object (0x10 bytes, list at header 0x64 count / 0x68 ptr):
+//  0x04 u32 LOD count  0x08 ptr LOD list (0x04 ptr name)
+struct SceneObjectRef
+{
+  std::uint32_t offset = 0;
+  std::string name;
 };
 
 struct Checkpoint
@@ -60,6 +75,8 @@ struct StaticPoly
   std::vector<int> surfaces;
   std::vector<int> cells;   // grid cells that reference this polygon
   bool modified = false;
+  bool added = false;       // copy made in the editor, appended on save
+  bool removed = false;     // added, then deleted again (kept for undo)
 };
 
 struct CollisionGrid
@@ -82,7 +99,16 @@ public:
   std::vector<StaticPoly>& polys() { return polys_; }
   const std::vector<StaticPoly>& polys() const { return polys_; }
   const CollisionGrid& grid() const { return grid_; }
+  const std::vector<SceneObjectRef>& scene_objects() const { return scene_objects_; }
   void RebuildCollision();
+
+  // Appends a copy of instance `source` (same scene object, flags and
+  // pointers) and returns its index. It is written into a relocated instance
+  // table on save (no pointers into the table exist besides header 0x54).
+  int AddInstance(int source);
+  // Appends a copy of collision polygon `source` (same surfaces); it gets a
+  // new index in a relocated triangle/quad array on save.
+  int AddPoly(int source);
 
   // Writes the editable fields of all instances back into the raw buffer.
   Bytes Serialize() const;
@@ -93,7 +119,9 @@ private:
   std::vector<Checkpoint> checkpoints_;
   CollisionPolys collision_;
   std::vector<StaticPoly> polys_;
+  std::vector<SceneObjectRef> scene_objects_;
   CollisionGrid grid_;
+  std::uint32_t static_collider_ = 0;
 };
 
 Mat34 ComposeMatrix(const Vec3& pos, const std::array<std::int16_t, 3>& rot, const Vec3& scale);

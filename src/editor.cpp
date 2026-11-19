@@ -94,6 +94,13 @@ bool RayBox(const glm::vec3& o, const glm::vec3& d, const glm::vec3& mn, const g
 
 const glm::vec3 kMissingMin(-8, -8, -8), kMissingMax(8, 8, 8);
 
+const char* const kStructureCategories[] = {
+    "Boost & special zones",       // groups with collision polygons (dash plates ...)
+    "Object groups",               // several linked objects
+    "Single objects",
+    "Track pieces (visual only)",  // road/guardrail models placed at the origin
+};
+
 // Placeholder boxes keep a fixed size: strip the scale from the instance matrix.
 glm::mat4 WithoutScale(const glm::mat4& m)
 {
@@ -208,6 +215,10 @@ void Editor::CloseCourse()
   original_.clear();
   original_polys_.clear();
   background_.clear();
+  structures_.clear();
+  spawn_groups_.clear();
+  armed_ = -1;
+  hover_valid_ = false;
   undo_.clear();
   redo_.clear();
   selected_ = -1;
@@ -249,6 +260,7 @@ void Editor::OpenCourse(int id)
   for (int s : col.surface)
     colors.push_back(SurfaceColor(s));
   collision_mesh_ = renderer_.UploadColored(col.triangles, colors);
+  BuildStructures();
 
   bool from_mod = false;
   for (const auto& c : courses_)
@@ -292,6 +304,20 @@ void Editor::SetFromMatrix(int i, const Mat34& m)
   Set(i, t);
 }
 
+bool Editor::IsWorldPiece(int i) const
+{
+  const auto& in = course_->instances()[i];
+  const glm::vec3 p(in.matrix[3], in.matrix[7], in.matrix[11]);
+  if (glm::length(p) < 1.0f)
+    return true;
+  const ModelMesh* m = models_->Find(in.name);
+  if (!m || m->positions.empty())
+    return false;
+  const glm::vec3 a(m->bounds_min[0], m->bounds_min[1], m->bounds_min[2]);
+  const glm::vec3 b(m->bounds_max[0], m->bounds_max[1], m->bounds_max[2]);
+  return glm::length((a + b) * 0.5f) > std::max(100.0f, glm::length(b - a) * 0.5f);
+}
+
 std::vector<int> Editor::Linked(int i) const
 {
   std::vector<int> out;
@@ -300,34 +326,33 @@ std::vector<int> Editor::Linked(int i) const
   const auto& list = course_->instances();
   auto prefix = [](const std::string& n) { return n.substr(0, n.find('_')); };
   const glm::vec3 p(list[i].matrix[3], list[i].matrix[7], list[i].matrix[11]);
-  // Track pieces (roads, guardrails) all sit at the world origin: never link those.
-  if (glm::length(p) < 1.0f || list[i].name.empty())
+  // Track pieces (roads, guardrails) mostly sit at the world origin: never link those.
+  if (list[i].name.empty() || IsWorldPiece(i))
     return out;
   const std::string pre = prefix(list[i].name);
   for (int j = 0; j < int(list.size()); ++j)
   {
-    if (j == i || IsBackground(j) || prefix(list[j].name) != pre)
+    if (j == i || list[j].removed || IsBackground(j) || prefix(list[j].name) != pre)
       continue;
     const glm::vec3 q(list[j].matrix[3], list[j].matrix[7], list[j].matrix[11]);
-    if (glm::length(q) >= 1.0f && glm::distance(p, q) <= link_radius_)
+    if (glm::distance(p, q) <= link_radius_ && !IsWorldPiece(j))
       out.push_back(j);
   }
   return out;
 }
 
-std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects) const
+std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects, bool force) const
 {
   std::vector<int> out;
-  if (!course_ || !move_collision_)
+  if (!course_ || (!move_collision_ && !force))
     return out;
   const auto& polys = course_->polys();
   std::vector<char> taken(polys.size(), 0);
   for (int i : objects)
   {
     const auto& in = course_->instances()[i];
-    const glm::vec3 pos(in.matrix[3], in.matrix[7], in.matrix[11]);
-    if (glm::length(pos) < 1.0f || IsBackground(i))
-      continue;  // track pieces at the origin / huge scenery: never grab collision
+    if (IsWorldPiece(i) || IsBackground(i))
+      continue;  // track pieces / huge scenery: never grab collision
     const ModelMesh* m = models_->Find(in.name);
     if (!m || m->positions.empty())
       continue;
@@ -340,7 +365,7 @@ std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects) const
     mx += pad;
     for (int p = 0; p < int(polys.size()); ++p)
     {
-      if (taken[p])
+      if (taken[p] || polys[p].removed)
         continue;
       bool inside = true;
       for (const auto& v : polys[p].v)
@@ -445,6 +470,8 @@ void Editor::Undo()
     Set(it.index, it.before);
   for (const auto& it : e.polys)
     SetPoly(it.poly, it.before);
+  for (const auto& it : e.alive)
+    SetAlive(it, !it.alive);
   if (!e.items.empty())
     selected_ = e.items.front().index;
   redo_.push_back(e);
@@ -460,12 +487,202 @@ void Editor::Redo()
     Set(it.index, it.after);
   for (const auto& it : e.polys)
     SetPoly(it.poly, it.after);
+  for (const auto& it : e.alive)
+    SetAlive(it, it.alive);
   if (!e.items.empty())
     selected_ = e.items.front().index;
+  else if (!e.alive.empty() && !e.alive.front().poly && e.alive.front().alive)
+    selected_ = e.alive.front().index;
   undo_.push_back(e);
 }
 
 bool Editor::Modified(int i) const { return !(Get(i) == original_[i]); }
+
+// ---------------------------------------------------------------------------
+// Structures (placing copies of object groups)
+
+void Editor::BuildStructures()
+{
+  structures_.clear();
+  const auto& list = course_->instances();
+  const bool link = link_;
+  link_ = true;  // groups are found the same way as linked objects
+  std::map<std::string, int> seen;  // signature -> structure
+  for (int i = 0; i < int(list.size()); ++i)
+  {
+    const auto& in = list[i];
+    if (in.added || in.name.empty() || IsBackground(i))
+      continue;
+    std::vector<int> members{i};
+    for (int j : Linked(i))
+      if (!list[j].added)
+        members.push_back(j);
+    // The same group seen from another member: identical sorted name list.
+    std::vector<std::string> names;
+    for (int m : members)
+      names.push_back(list[m].name);
+    std::sort(names.begin(), names.end());
+    std::string sig;
+    for (const auto& n : names)
+      sig += n + '|';
+    if (auto it = seen.find(sig); it != seen.end())
+    {
+      // Count each occurrence once (only from its lowest-index member).
+      if (*std::min_element(members.begin(), members.end()) == i)
+        ++structures_[it->second].uses;
+      continue;
+    }
+    Structure st;
+    st.members = members;
+    // Only special zones (boost etc.) come along; types 10-13 make up the bulk of
+    // all polygons (walls/borders, ~13,000 over all courses) and stay with the track.
+    for (int p : AttachedPolys(members, true))
+    {
+      const auto& sf = course_->polys()[p].surfaces;
+      if (std::none_of(sf.begin(), sf.end(), [](int t) { return t >= 10; }))
+        st.polys.push_back(p);
+    }
+    st.uses = 1;
+    const glm::vec3 pos(in.matrix[3], in.matrix[7], in.matrix[11]);
+    const bool at_origin = IsWorldPiece(i);
+    st.anchor = pos;
+    if (at_origin)
+    {
+      // World-space road pieces: anchor at the bottom centre of their bounds.
+      if (const ModelMesh* m = models_->Find(in.name); m && !m->positions.empty())
+      {
+        const glm::mat4 M = ToGlm(in.matrix);
+        const glm::vec3 a = glm::vec3(M * glm::vec4(m->bounds_min[0], m->bounds_min[1], m->bounds_min[2], 1));
+        const glm::vec3 b = glm::vec3(M * glm::vec4(m->bounds_max[0], m->bounds_max[1], m->bounds_max[2], 1));
+        const glm::vec3 lo = glm::min(a, b), hi = glm::max(a, b);
+        st.anchor = {(lo.x + hi.x) * 0.5f, lo.y, (lo.z + hi.z) * 0.5f};
+      }
+    }
+    st.category = at_origin ? 3 : !st.polys.empty() ? 0 : members.size() > 1 ? 1 : 2;
+    st.label = in.name;
+    if (members.size() > 1)
+      st.label += " + " + std::to_string(members.size() - 1);
+    seen[sig] = int(structures_.size());
+    structures_.push_back(std::move(st));
+  }
+  link_ = link;
+  std::stable_sort(structures_.begin(), structures_.end(), [](const Structure& a, const Structure& b) {
+    return a.category != b.category ? a.category < b.category : a.label < b.label;
+  });
+}
+
+std::vector<int> Editor::Spawn(const std::vector<int>& members, const std::vector<int>& polys, const glm::vec3& offset)
+{
+  UndoEntry e;
+  std::vector<int> made, made_polys;
+  for (int m : members)
+  {
+    const int n = course_->AddInstance(m);
+    auto& in = course_->instances()[n];
+    for (int k = 0; k < 3; ++k)
+    {
+      in.position[k] += offset[k];
+      in.matrix[k * 4 + 3] += offset[k];
+    }
+    original_.push_back(Get(n));
+    background_.push_back(IsBackground(m));
+    made.push_back(n);
+    e.alive.push_back({n, false, true});
+  }
+  for (int p : polys)
+  {
+    const int q = course_->AddPoly(p);
+    for (auto& v : course_->polys()[q].v)
+      for (int k = 0; k < 3; ++k)
+        v[k] += offset[k];
+    original_polys_.push_back(course_->polys()[q].v);
+    made_polys.push_back(q);
+    e.alive.push_back({q, true, true});
+  }
+  for (int n : made)
+    spawn_groups_[n] = {made, made_polys};
+  collision_dirty_ = !polys.empty() || collision_dirty_;
+  dirty_ = true;
+  undo_.push_back(std::move(e));
+  redo_.clear();
+  if (!made.empty())
+  {
+    selected_ = made.front();
+    scroll_to_selection_ = true;
+  }
+  return made;
+}
+
+void Editor::PlaceStructure(int s, const glm::vec3& target)
+{
+  const Structure& st = structures_.at(std::size_t(s));
+  Spawn(st.members, st.polys, target - st.anchor);
+  Status("Placed " + st.label + (st.polys.empty() ? "" : " with " + std::to_string(st.polys.size()) + " collision polygons") +
+         ". Ctrl+Z undoes, Del deletes it again.");
+}
+
+void Editor::DuplicateSelection()
+{
+  if (!course_ || selected_ < 0)
+    return;
+  std::vector<int> members{selected_};
+  for (int j : Linked(selected_))
+    members.push_back(j);
+  const std::vector<int> polys = AttachedPolys(members);
+  // Shift the copy sideways (camera right) by the object's width so it does not overlap.
+  float width = 20;
+  if (const ModelMesh* m = models_->Find(course_->instances()[selected_].name); m && !m->positions.empty())
+    width = std::max(width, glm::length(glm::vec3(ToGlm(course_->instances()[selected_].matrix) *
+                                                  glm::vec4(m->bounds_max[0] - m->bounds_min[0], 0,
+                                                            m->bounds_max[2] - m->bounds_min[2], 0))));
+  const glm::vec3 right = glm::normalize(glm::cross(cam_.Forward(), glm::vec3(0, 1, 0)));
+  Spawn(members, polys, right * (width * 1.1f));
+  Status("Duplicated " + std::to_string(members.size()) + " object(s)" +
+         (polys.empty() ? "" : " and " + std::to_string(polys.size()) + " collision polygons") + ".");
+}
+
+void Editor::DeleteSelection()
+{
+  if (!course_ || selected_ < 0)
+    return;
+  if (!course_->instances()[selected_].added)
+  {
+    Status("Only objects placed in this session can be deleted (original objects cannot be removed yet).", true);
+    return;
+  }
+  UndoEntry e;
+  auto it = spawn_groups_.find(selected_);
+  std::vector<int> objects = it != spawn_groups_.end() ? it->second.first : std::vector<int>{selected_};
+  const std::vector<int> polys = it != spawn_groups_.end() ? it->second.second : std::vector<int>{};
+  for (int i : objects)
+    if (Alive(i))
+      e.alive.push_back({i, false, false});
+  for (int p : polys)
+    if (!course_->polys()[p].removed)
+      e.alive.push_back({p, true, false});
+  for (const auto& a : e.alive)
+    SetAlive(a, false);
+  undo_.push_back(std::move(e));
+  redo_.clear();
+  selected_ = -1;
+  Status("Deleted " + std::to_string(objects.size()) + " placed object(s).");
+}
+
+void Editor::SetAlive(const AliveItem& item, bool alive)
+{
+  if (item.poly)
+  {
+    course_->polys()[item.index].removed = !alive;
+    collision_dirty_ = true;
+  }
+  else
+  {
+    course_->instances()[item.index].removed = !alive;
+    if (!alive && selected_ == item.index)
+      selected_ = -1;
+  }
+  dirty_ = true;
+}
 
 bool Editor::Save()
 {
@@ -496,10 +713,17 @@ void Editor::Launch()
          !ok);
 }
 
-void Editor::DebugStart(int course, int select, bool collision)
+void Editor::DebugStart(int course, int select, bool collision, int place)
 {
   if (course >= 0)
     OpenCourse(course);
+  if (course_ && place >= 0 && place < int(structures_.size()))
+  {
+    PlaceStructure(place, structures_[place].anchor + glm::vec3(60, 0, 0));
+    open_structures_tab_ = true;
+    FocusSelection();
+    return;
+  }
   if (course_ && select >= 0 && select < int(course_->instances().size()))
   {
     selected_ = select;
@@ -564,7 +788,7 @@ void Editor::FocusSelection()
   cam_.pos = c - cam_.Forward() * (r * 2.5f + 20);
 }
 
-int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
+int Editor::Pick(const glm::vec3& o, const glm::vec3& d, float* t_out, bool background)
 {
   int best = -1;
   float best_t = 1e30f;
@@ -572,7 +796,7 @@ int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
   for (int i = 0; i < int(list.size()); ++i)
   {
     const auto& in = list[i];
-    if (IsBackground(i))
+    if (in.removed || (IsBackground(i) && (!background || !show_background_)))
       continue;  // ground/sky planes would swallow every click
     const ModelMesh* mm = models_->Find(in.name);
     const bool solid = mm && !mm->positions.empty();
@@ -607,7 +831,36 @@ int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
         best_t = t, best = i;
     }
   }
+  if (t_out)
+    *t_out = best_t;
   return best;
+}
+
+bool Editor::RayHit(const glm::vec3& o, const glm::vec3& d, glm::vec3& hit)
+{
+  float best = 1e30f;
+  if (show_models_)
+  {
+    float t;
+    const int i = Pick(o, d, &t, true);
+    // Placeholder boxes are no surface to place on.
+    if (i >= 0)
+      if (const ModelMesh* m = models_->Find(course_->instances()[i].name); m && !m->positions.empty())
+        best = t;
+  }
+  const auto& tris = course_->collision().triangles;
+  for (std::size_t k = 0; k + 2 < tris.size(); k += 3)
+  {
+    float t;
+    const glm::vec3 a(tris[k][0], tris[k][1], tris[k][2]), b(tris[k + 1][0], tris[k + 1][1], tris[k + 1][2]),
+        c(tris[k + 2][0], tris[k + 2][1], tris[k + 2][2]);
+    if (RayTriangle(o, d, a, b, c, t) && t < best)
+      best = t;
+  }
+  if (best >= 1e29f)
+    return false;
+  hit = o + d * best;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +897,17 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
       if (ImGui::IsKeyPressed(ImGuiKey_F))
         FocusSelection();
       if (ImGui::IsKeyPressed(ImGuiKey_Escape))
-        selected_ = -1;
+      {
+        if (armed_ >= 0)
+          armed_ = -1;
+        else
+          selected_ = -1;
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Delete) && course_)
+        DeleteSelection();
     }
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && course_)
+      DuplicateSelection();
   }
 
   ImGuizmo::BeginFrame();
@@ -703,14 +965,38 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
   }
   view_ = cam_.View();
 
+  const float nx = (mp.x - vx) / vw * 2 - 1, ny = 1 - (mp.y - vy) / vh * 2;
+  const glm::mat4 inv = glm::inverse(proj_ * view_);
+  const glm::vec4 a = inv * glm::vec4(nx, ny, -1, 1), b = inv * glm::vec4(nx, ny, 1, 1);
+  const glm::vec3 ray_o = glm::vec3(a) / a.w, ray_d = glm::normalize(glm::vec3(b) / b.w - ray_o);
+
+  // Placing a structure: preview under the mouse, left click places it
+  // (Shift keeps the tool for the next one), Esc / right click cancels.
+  hover_valid_ = false;
+  if (course_ && armed_ >= 0)
+  {
+    if (over && !look_active_)
+    {
+      hover_valid_ = RayHit(ray_o, ray_d, hover_);
+      if (!hover_valid_)
+      {
+        hover_ = ray_o + ray_d * 300.0f;
+        hover_valid_ = true;
+      }
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      {
+        PlaceStructure(armed_, hover_);
+        if (!io.KeyShift)
+          armed_ = -1;
+      }
+    }
+    return;
+  }
+
   // Click to select (unless the gizmo takes the click).
   if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsOver())
   {
-    const float nx = (mp.x - vx) / vw * 2 - 1, ny = 1 - (mp.y - vy) / vh * 2;
-    const glm::mat4 inv = glm::inverse(proj_ * view_);
-    glm::vec4 a = inv * glm::vec4(nx, ny, -1, 1), b = inv * glm::vec4(nx, ny, 1, 1);
-    const glm::vec3 o = glm::vec3(a) / a.w, e = glm::vec3(b) / b.w;
-    selected_ = Pick(o, glm::normalize(e - o));
+    selected_ = Pick(ray_o, ray_d);
     scroll_to_selection_ = true;
   }
 }
@@ -757,6 +1043,8 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     for (int i = 0; i < int(list.size()); ++i)
     {
       const auto& in = list[i];
+      if (in.removed)
+        continue;
       const glm::mat4 M = ToGlm(in.matrix);
       const GpuMesh& g = gpu_[in.name];
       const bool sel = i == selected_ || (selected_ >= 0 && std::find(linked_now.begin(), linked_now.end(), i) != linked_now.end());
@@ -803,6 +1091,42 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         const std::uint32_t col = k == 0 ? Rgba(80, 255, 120) : Rgba(255, 220, 40, 110);
         lines.push_back({a - side, col});
         lines.push_back({a + side, col});
+      }
+    }
+    if (armed_ >= 0 && hover_valid_)
+    {
+      // Preview of the structure being placed.
+      const Structure& st = structures_[armed_];
+      const glm::vec3 off = hover_ - st.anchor;
+      const glm::mat4 T = glm::translate(glm::mat4(1), off);
+      for (int m : st.members)
+      {
+        const auto& in = list[m];
+        const GpuMesh& g = gpu_[in.name];
+        if (g.count)
+          renderer_.Draw(g, T * ToGlm(in.matrix), glm::vec4(1), glm::vec4(0.2f, 0.9f, 0.4f, 0.5f));
+        else
+          AddBox(lines, T * WithoutScale(ToGlm(in.matrix)), kMissingMin, kMissingMax, Rgba(80, 255, 120));
+      }
+      for (int p : st.polys)
+      {
+        const auto& v = course_->polys()[p].v;
+        for (std::size_t k = 0; k < v.size(); ++k)
+        {
+          const glm::vec3 a = glm::vec3(v[k][0], v[k][1] + 0.3f, v[k][2]) + off;
+          const glm::vec3 b = glm::vec3(v[(k + 1) % v.size()][0], v[(k + 1) % v.size()][1] + 0.3f,
+                                        v[(k + 1) % v.size()][2]) + off;
+          lines.push_back({a, Rgba(255, 235, 0)});
+          lines.push_back({b, Rgba(255, 235, 0)});
+        }
+      }
+      // Cross marking the spot.
+      for (int k = 0; k < 3; ++k)
+      {
+        glm::vec3 e(0);
+        e[k] = 15;
+        lines.push_back({hover_ - e, Rgba(80, 255, 120)});
+        lines.push_back({hover_ + e, Rgba(80, 255, 120)});
       }
     }
     if (selected_ >= 0)
@@ -905,6 +1229,11 @@ void Editor::DrawMenu()
       Undo();
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redo_.empty()))
       Redo();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Duplicate selection", "Ctrl+D", false, selected_ >= 0))
+      DuplicateSelection();
+    if (ImGui::MenuItem("Delete placed object", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
+      DeleteSelection();
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("View"))
@@ -933,6 +1262,8 @@ void Editor::DrawMenu()
         "           mouse wheel = forward/back, middle mouse button = pan\n"
         "Selection: left click in the 3D view or in the object list\n"
         "Gizmo:     W move, E rotate, R scale, F focus\n"
+        "Place:     Structures tab, pick an entry, click in the 3D view\n"
+        "           (Shift+click places several), Ctrl+D duplicate, Del delete\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
         "Note: road models are visuals only. The driving surface and physics come\n"
         "from the track spline (yellow line), which cannot be edited yet.\n\n"
@@ -971,23 +1302,49 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
   }
   ImGui::TextDisabled("* = changed in the mod folder");
 
-  ImGui::SeparatorText("Objects");
   if (!course_)
   {
+    ImGui::SeparatorText("Objects");
     ImGui::TextDisabled("No course loaded.");
     ImGui::End();
     return;
   }
+  if (ImGui::BeginTabBar("##lefttabs"))
+  {
+    if (ImGui::BeginTabItem("Objects"))
+    {
+      DrawObjectList();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Structures", nullptr, open_structures_tab_ ? ImGuiTabItemFlags_SetSelected : 0))
+    {
+      DrawStructurePanel();
+      ImGui::EndTabItem();
+    }
+    open_structures_tab_ = false;
+    ImGui::EndTabBar();
+  }
+  ImGui::End();
+}
+
+void Editor::DrawObjectList()
+{
   ImGui::SetNextItemWidth(-1);
   ImGui::InputTextWithHint("##filter", "Filter (name)…", &filter_);
   std::string needle = filter_;
   std::transform(needle.begin(), needle.end(), needle.begin(), ::toupper);
   std::vector<int> rows;
   const auto& list = course_->instances();
+  int alive = 0;
   for (int i = 0; i < int(list.size()); ++i)
+  {
+    if (list[i].removed)
+      continue;
+    ++alive;
     if (needle.empty() || list[i].name.find(needle) != std::string::npos)
       rows.push_back(i);
-  ImGui::TextDisabled("%zu of %zu", rows.size(), list.size());
+  }
+  ImGui::TextDisabled("%zu of %d", rows.size(), alive);
   ImGui::BeginChild("##objects", {-1, -1}, ImGuiChildFlags_Borders);
   ImGuiListClipper clip;
   clip.Begin(int(rows.size()));
@@ -1005,7 +1362,7 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
       const GpuMesh& g = gpu_[in.name];
       char label[160];
       std::snprintf(label, sizeof label, "%4d  %s%s", i, in.name.empty() ? "(unnamed)" : in.name.c_str(),
-                    Modified(i) ? "  *" : "");
+                    in.added ? "  +" : Modified(i) ? "  *" : "");
       if (!g.count)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1));
       if (ImGui::Selectable(label, i == selected_))
@@ -1022,7 +1379,74 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
     }
   ImGui::EndChild();
   scroll_to_selection_ = false;
-  ImGui::End();
+}
+
+void Editor::DrawStructurePanel()
+{
+  if (armed_ >= 0)
+  {
+    ImGui::TextColored({0.4f, 1, 0.55f, 1}, "Placing: %s", structures_[armed_].label.c_str());
+    ImGui::TextDisabled("Click in the 3D view. Shift+click\nplaces several, Esc cancels.");
+    if (ImGui::Button("Cancel", {-1, 0}))
+      armed_ = -1;
+  }
+  else
+    ImGui::TextDisabled("Pick a structure, then click in the\n3D view to place a copy there.");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputTextWithHint("##sfilter", "Filter (name)…", &structure_filter_);
+  std::string needle = structure_filter_;
+  std::transform(needle.begin(), needle.end(), needle.begin(), ::toupper);
+  ImGui::BeginChild("##structures", {-1, -1}, ImGuiChildFlags_Borders);
+  const auto& list = course_->instances();
+  for (int c = 0; c < int(std::size(kStructureCategories)); ++c)
+  {
+    std::vector<int> rows;
+    for (int k = 0; k < int(structures_.size()); ++k)
+      if (structures_[k].category == c && (needle.empty() || structures_[k].label.find(needle) != std::string::npos))
+        rows.push_back(k);
+    if (rows.empty())
+      continue;
+    char header[96];
+    std::snprintf(header, sizeof header, "%s (%zu)###cat%d", kStructureCategories[c], rows.size(), c);
+    if (!ImGui::CollapsingHeader(header, c == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+      continue;
+    for (int k : rows)
+    {
+      const Structure& st = structures_[k];
+      ImGui::PushID(k);
+      if (ImGui::Selectable(st.label.c_str(), armed_ == k))
+      {
+        armed_ = armed_ == k ? -1 : k;
+        selected_ = -1;
+      }
+      if (st.uses > 1)
+      {
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
+        ImGui::TextDisabled("x%d", st.uses);
+      }
+      if (ImGui::BeginItemTooltip())
+      {
+        for (int m : st.members)
+          ImGui::Text("#%d  %s", m, list[m].name.c_str());
+        if (!st.polys.empty())
+        {
+          int boost = 0;
+          for (int p : st.polys)
+          {
+            const auto& sf = course_->polys()[p].surfaces;
+            boost += std::find(sf.begin(), sf.end(), 3) != sf.end();
+          }
+          ImGui::TextColored({1, 0.85f, 0.3f, 1}, "%zu collision polygons (%d boost)", st.polys.size(), boost);
+        }
+        if (st.category == 3)
+          ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Road models are visuals only: they do not\nchange where the track can be driven.");
+        ImGui::TextDisabled("Occurs %d time(s) in this course.", st.uses);
+        ImGui::EndTooltip();
+      }
+      ImGui::PopID();
+    }
+  }
+  ImGui::EndChild();
 }
 
 void Editor::DrawInspector(float x, float y, float w, float h)
@@ -1052,7 +1476,10 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
   auto& in = course_->instances()[selected_];
   ImGui::Text("#%d  %s", selected_, in.name.c_str());
-  ImGui::TextDisabled("Offset 0x%05X  Flags 0x%08X", in.offset, in.flags);
+  if (in.added)
+    ImGui::TextColored({0.4f, 1, 0.55f, 1}, "Placed in the editor (Del deletes it)");
+  else
+    ImGui::TextDisabled("Offset 0x%05X  Flags 0x%08X", in.offset, in.flags);
   const ModelMesh* m = models_->Find(in.name);
   if (!m)
     ImGui::TextColored({1, 0.5f, 0.4f, 1}, "Model not found (placeholder)");
@@ -1060,7 +1487,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
     ImGui::TextColored({0.5f, 0.8f, 1, 1}, "Animated/skinned model (box only)");
   else
     ImGui::TextDisabled("%zu triangles", m->positions.size() / 3);
-  if (!in.matrix_offset)
+  if (!in.HasMatrix())
     ImGui::TextColored({1, 0.8f, 0.3f, 1}, "No matrix: the game uses its own logic,\nchanges may have no effect.");
 
   Transform t = Get(selected_);
@@ -1150,6 +1577,15 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
 
   ImGui::Spacing();
+  if (ImGui::Button("Duplicate (Ctrl+D)"))
+    DuplicateSelection();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!in.added);
+  if (ImGui::Button("Delete (Del)"))
+    DeleteSelection();
+  ImGui::EndDisabled();
+  if (!in.added)
+    ImGui::SetItemTooltip("Only objects placed in this session can be deleted.");
   if (ImGui::Button("Bring in front of camera"))
   {
     // Moves the object 300 units in front of the camera.
@@ -1178,11 +1614,17 @@ void Editor::DrawInspector(float x, float y, float w, float h)
 
   ImGui::SeparatorText("Course");
   ImGui::Text("Course %02d  %s", course_id_, venue_.c_str());
-  ImGui::TextDisabled("%zu objects, %zu checkpoints", course_->instances().size(), course_->checkpoints().size());
-  int changed_count = 0;
+  ImGui::TextDisabled("%zu objects, %zu checkpoints", std::size_t(std::count_if(course_->instances().begin(), course_->instances().end(), [](const SceneInstance& o) { return !o.removed; })), course_->checkpoints().size());
+  int changed_count = 0, added_count = 0;
   for (int i = 0; i < int(course_->instances().size()); ++i)
-    changed_count += Modified(i);
-  ImGui::Text("Changed objects: %d", changed_count);
+  {
+    const auto& o = course_->instances()[i];
+    if (o.added)
+      added_count += !o.removed;
+    else
+      changed_count += Modified(i);
+  }
+  ImGui::Text("Changed objects: %d, placed: %d", changed_count, added_count);
   if (ImGui::Button("Save", {-1, 0}))
     Save();
   if (ImGui::Button("Test in game (F5)", {-1, 0}))

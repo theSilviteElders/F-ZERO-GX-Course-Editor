@@ -33,10 +33,32 @@ struct PolyUndoItem
   std::vector<Vec3> before, after;
 };
 
+// An object or collision polygon placed (alive = true) or deleted (false).
+struct AliveItem
+{
+  int index;
+  bool poly;
+  bool alive;  // state after the action
+};
+
 struct UndoEntry
 {
   std::vector<UndoItem> items;
   std::vector<PolyUndoItem> polys;  // collision polygons carried along (e.g. dash zones)
+  std::vector<AliveItem> alive;     // objects/polygons placed or deleted
+};
+
+// A placeable structure: a group of objects found in the course (e.g. dash
+// plate + arrow marker + ring) together with its collision polygons (boost
+// zone). Placing it copies all of them.
+struct Structure
+{
+  std::string label;
+  int category = 0;           // see kStructureCategories in editor.cpp
+  std::vector<int> members;   // template instances, members[0] = primary
+  std::vector<int> polys;     // template collision polygons
+  glm::vec3 anchor{0};        // point that lands on the clicked spot
+  int uses = 0;               // how often the group occurs in the course
 };
 
 struct Camera
@@ -58,7 +80,7 @@ public:
   void Frame(int fb_w, int fb_h, float scale, float dt);
   bool WantsQuit() const { return quit_; }
   void RequestQuit();
-  void DebugStart(int course, int select, bool collision);
+  void DebugStart(int course, int select, bool collision, int place = -1);
 
 private:
   // Course handling
@@ -80,7 +102,8 @@ private:
   // EndEdit records one undo step.
   std::vector<int> Linked(int i) const;
   // Static collision polygons lying entirely under one of the given objects.
-  std::vector<int> AttachedPolys(const std::vector<int>& objects) const;
+  // force: ignore the "move collision along" setting.
+  std::vector<int> AttachedPolys(const std::vector<int>& objects, bool force = false) const;
   void SetPoly(int p, const std::vector<Vec3>& v);
   void BeginEdit();
   void ApplyPrimary(const Transform& t);
@@ -88,17 +111,32 @@ private:
   void Undo();
   void Redo();
   bool Modified(int i) const;
+  bool Alive(int i) const { return !course_->instances()[i].removed; }
+
+  // Placing structures
+  void BuildStructures();
+  // Copies objects + polygons, moved by `offset`; one undo step. Returns the new objects.
+  std::vector<int> Spawn(const std::vector<int>& members, const std::vector<int>& polys, const glm::vec3& offset);
+  void PlaceStructure(int s, const glm::vec3& target);
+  void DuplicateSelection();
+  void DeleteSelection();
+  void SetAlive(const AliveItem& item, bool alive);
 
   // UI pieces
   void DrawMenu();
   void DrawCoursePanel(float x, float y, float w, float h);
+  void DrawObjectList();
+  void DrawStructurePanel();
   void DrawInspector(float x, float y, float w, float h);
   void DrawSettings();
   void DrawPopups();
   void DrawStatus(float x, float y, float w);
   void HandleViewportInput(float vx, float vy, float vw, float vh, float dt);
   void RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy, float vw, float vh);
-  int Pick(const glm::vec3& origin, const glm::vec3& dir);
+  // Closest object under the ray; *t = hit distance. background: include ground/sky models.
+  int Pick(const glm::vec3& origin, const glm::vec3& dir, float* t = nullptr, bool background = false);
+  // Point where a ray hits a model or collision polygon (false: nothing hit).
+  bool RayHit(const glm::vec3& origin, const glm::vec3& dir, glm::vec3& hit);
   void FocusSelection();
   void FrameCourse();
   void Status(std::string msg, bool error = false);
@@ -145,7 +183,20 @@ private:
   bool show_background_ = true;
   std::vector<char> background_;  // per instance: huge ground/sky model (> 8000 units)
   bool IsBackground(int i) const { return i < int(background_.size()) && background_[i]; }
+  // Track pieces (roads, guardrails): world-space geometry far away from the
+  // object's own origin, usually placed at (0,0,0).
+  bool IsWorldPiece(int i) const;
   bool look_active_ = false;
+
+  // Structures
+  std::vector<Structure> structures_;
+  std::string structure_filter_;
+  int armed_ = -1;  // structure that the next click in the 3D view places
+  bool open_structures_tab_ = false;
+  bool hover_valid_ = false;
+  glm::vec3 hover_{0};
+  // Placed object -> the objects and polygons placed together with it.
+  std::map<int, std::pair<std::vector<int>, std::vector<int>>> spawn_groups_;
 
   // Popups / status
   int pending_course_ = -1;

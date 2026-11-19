@@ -70,6 +70,12 @@ editor under *File → Settings* or with
   (double click focuses), `F` focuses, `Esc` clears the selection.
 - **Gizmo:** `W` move, `E` rotate, `R` scale; optional snapping.
   Values can also be typed into the inspector on the right.
+- **Structures:** the *Structures* tab lists placeable copies of what the
+  course already contains, grouped into boost & special zones (e.g. dash
+  plate + marker + rings + boost polygons), object groups, single objects and
+  track pieces. Click an entry, then click in the 3D view (Shift+click for
+  several, Esc cancels). `Ctrl+D` duplicates the selection, `Del` deletes a
+  placed object.
 - **Ctrl+Z / Ctrl+Y:** undo / redo.
 - **Ctrl+S:** saves the compressed course into `work/mod/GFZE01`.
 - **F5:** saves and starts the game from the mod folder directly in a race on
@@ -105,7 +111,8 @@ NTSC-U (`GFZE01`) only. There is no direct start with Dolphin as launcher.
 - `COLI_COURSExx`: header `0x48`/`0x54` = count/pointer of the placed objects
   (`0x40` bytes each: position, rotation as s16 with 65536 = 360°, scale,
   pointer to a 3×4 matrix). `M = Rz·Ry·Rx·S` holds for all ~18,000 objects.
-  The editor writes both (TRS + matrix).
+  The editor writes both (TRS + matrix). Scene objects (model references,
+  `0x10` bytes: LOD count, LOD list → name) are listed at `0x64`/`0x68`.
   Track checkpoints (`0x08`) provide the centre line and width, the static
   collision (`0x1C`) triangles/quads in 14 surface grids.
 - Static collision: triangle `0x58` / quad `0x70` bytes:
@@ -139,15 +146,22 @@ and write to a separate file), `unlz`, `lz`.
 
 - Road models are visuals only: driving surface, physics and AI come from the
   track spline (yellow line), which cannot be edited yet.
-- Objects can be changed but not added or deleted yet (that requires
-  re-laying out the file, including all pointers).
+- New objects are copies of objects in the same course (same scene object,
+  flags and pointers). On save the instance table (header `0x48` count,
+  `0x54` pointer) is copied to the end of the file with the new entries
+  appended. Nothing else points into that table. Added collision polygons
+  extend copies of the triangle/quad arrays the same way. Not tested in the
+  game yet. Only objects placed in the current session can be deleted;
+  original objects cannot be removed.
+- Models from other courses cannot be placed (the game only loads the
+  course's own model archives).
 - Some models (skinned/animated, 16-bit vertices) appear as a blue box,
   models that are not found as a red box.
 - Whether every object really appears in the game where it was moved
   (e.g. visibility/collision grids) has to be tested in the game.
 - Textures use only the first layer and the first UV set (no multi-texture
   blending, texture scrolling or environment maps).
-- Track spline editing, duplicating objects.
+- Track spline editing.
 
 ## AI disclosure
 

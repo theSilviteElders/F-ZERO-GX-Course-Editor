@@ -146,13 +146,60 @@ static int SelfTest(const fs::path& workspace)
         add_ok = found && re.polys().size() == course.polys().size() + 1;
       }
     }
-    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f && add_ok;
+    // Track spline: anchors, checkpoint grid rule, editing round trip.
+    float anchor_err = 0;
+    for (const auto& cp : course.checkpoints())
+      anchor_err = std::max(anchor_err, cp.anchor_error);
+    int grid_missing = 0, grid_extra = 0;
+    {
+      const std::uint32_t table = U32(data, 0xBC);
+      const int nx = int(U32(data, 0xD0)), nz = int(U32(data, 0xD4));
+      const CheckpointGrid g = BuildCheckpointGrid(course, nx, nz);
+      for (int cell = 0; table && cell < nx * nz; ++cell)
+      {
+        std::vector<std::uint16_t> orig;
+        for (std::uint32_t l = U32(data, table + 4 * cell); l && U16(data, l) != 0xFFFF; l += 2)
+          orig.push_back(U16(data, l));
+        const auto& mine = g.cells.at(std::size_t(cell));
+        for (auto n : orig)
+          grid_missing += std::find(mine.begin(), mine.end(), n) == mine.end();
+        grid_extra += int(mine.size()) - int(orig.size());
+      }
+    }
+    bool track_ok = true;
+    {
+      Course c = course;
+      const auto handles = c.TrackHandles();
+      if (!handles.empty())
+      {
+        const TrackHandle h = handles[handles.size() / 2];
+        const Vec3 before = c.HandlePosition(h);
+        c.MoveHandle(h, c.segments()[h.segment].curves, {0, 40, 25});
+        c.UpdateTrack();
+        const Vec3 after = c.HandlePosition(h);
+        track_ok = c.track_modified() && std::fabs(after[1] - before[1] - 40) < 0.05f && std::fabs(after[2] - before[2] - 25) < 0.05f;
+        const Course re = Course::Parse(c.Serialize());
+        track_ok &= re.instances().size() == c.instances().size() && re.segments().size() == c.segments().size() &&
+                    re.checkpoints().size() == c.checkpoints().size() && std::fabs(re.track_length() - c.track_length()) < 1e-3f;
+        for (std::size_t k = 0; track_ok && k < re.segments().size(); ++k)
+          track_ok = re.segments()[k].curves == c.segments()[k].curves;
+        for (std::size_t k = 0; track_ok && k < re.checkpoints().size(); ++k)
+        {
+          const auto& a = re.checkpoints()[k];
+          const auto& b = c.checkpoints()[k];
+          track_ok = a.start == b.start && a.end == b.end && a.dist0 == b.dist0 && a.dist1 == b.dist1;
+        }
+        if (!track_ok)
+          std::printf("  track edit failed: handle seg %d t=%.3f\n", h.segment, h.time);
+      }
+    }
+    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f && add_ok && grid_missing == 0 && track_ok;
     failures += !ok;
-    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e add=%s lz %6zu->%6zu %lldms\n",
+    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e add=%s track: segs=%zu anchor=%.1f grid-%d/+%d edit=%s lz %6zu->%6zu %lldms\n",
                 ok ? "OK  " : "FAIL", Project::CourseFile(info.id).c_str(), venue.c_str(),
                 course.instances().size(), with_matrix, animated, shared, max_err, found,
                 course.instances().size(), skinned, empty, tris, course.checkpoints().size(),
-                course.collision().triangles.size() / 3, poly_err, add_ok ? "ok" : "FAIL", raw.size(), packed.size(), (long long)ms);
+                course.collision().triangles.size() / 3, poly_err, add_ok ? "ok" : "FAIL", course.segments().size(), anchor_err, grid_missing, grid_extra, track_ok ? "ok" : "FAIL", raw.size(), packed.size(), (long long)ms);
   }
   std::printf("lz total: original %zu, ours %zu bytes\n", total_in, total_out);
   return failures ? 1 : 0;

@@ -67,6 +67,18 @@ collision polygon arrays are copied to the end with the new entries). The
 format check in `fzgx-cli selftest` passes for all courses, but whether the
 game accepts it is not tested yet. That is the main question here.
 
+## 2c. Move the track spline
+
+1. Press **T** (or tick *Edit track spline* on the right). Orange points
+   appear on the track line, the cyan lines are the track edges.
+2. Click a point on a straight and drag the green (up) arrow of the gizmo
+   about 100 units up. The track line forms a hill, the road model stays.
+3. Ctrl+Z undoes it, *Reset whole track* restores the original spline.
+
+In the game: does the vehicle drive over the invisible hill (follows the
+spline), or along the road model? Does the course load, do lap counting and
+the position display still work?
+
 ## 3. Save and start the game
 
 - **F5** saves the course and starts GLINUX **directly in a race** on the open
@@ -88,6 +100,7 @@ game accepts it is not tested yet. That is the main question here.
 | Boost | Does the boost work on the **whole** new area or at the new spot? |
 | Rest of the course | Other objects and the track are unchanged |
 | Placed structure | Does the new dash plate appear, and does its boost work? |
+| Moved track point | Does the vehicle follow the new spline? Lap counting OK? |
 
 ## 5. If something goes wrong
 
@@ -115,6 +128,7 @@ game accepts it is not tested yet. That is the main question here.
 | Move / rotate / scale | `W` / `E` / `R` |
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Place a structure | *Structures* tab, click an entry, click in the 3D view |
+| Edit track spline | `T`, click a point, move it with the gizmo |
 | Duplicate / delete placed object | Ctrl+D / Del |
 | Save / test in game | Ctrl+S / F5 |
 | Textures on/off | *View → Textures* |
@@ -122,7 +136,7 @@ game accepts it is not tested yet. That is the main question here.
 ## Checking without the GUI (optional)
 
 ```bash
-./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision, adding objects
+./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision, adding objects, track spline
 ./build/fzgx-cli dump work 1 | head # list the objects of course 01
 ```
 

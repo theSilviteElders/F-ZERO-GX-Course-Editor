@@ -82,10 +82,11 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S]:
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY]:
   // render, save, quit (for testing and documentation).
   std::string screenshot;
-  int start_course = -1, start_select = -1, start_place = -1;
+  int start_course = -1, start_select = -1, start_place = -1, start_handle = -1;
+  float start_lift = 0;
   bool start_collision = false, no_textures = false;
   for (int i = 1; i < argc; ++i)
   {
@@ -100,6 +101,11 @@ int main(int argc, char** argv)
       start_select = std::atoi(argv[++i]);
     else if (a == "--place" && i + 1 < argc)
       start_place = std::atoi(argv[++i]);  // place structure S next to its original, select it
+    else if (a == "--track-lift" && i + 2 < argc)
+    {
+      start_handle = std::atoi(argv[++i]);  // track mode, move point H up by DY
+      start_lift = float(std::atof(argv[++i]));
+    }
     else if (a == "--collision")
       start_collision = true;
     else if (a == "--no-textures")
@@ -171,7 +177,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  editor.DebugStart(start_course, start_select, start_collision, start_place);
+  editor.DebugStart(start_course, start_select, start_collision, start_place, start_handle, start_lift);
   int frame = 0;
   Uint64 last = SDL_GetTicksNS();
   while (!editor.WantsQuit())

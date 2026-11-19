@@ -217,6 +217,8 @@ void Editor::CloseCourse()
   background_.clear();
   structures_.clear();
   spawn_groups_.clear();
+  handles_.clear();
+  handle_ = -1;
   armed_ = -1;
   hover_valid_ = false;
   undo_.clear();
@@ -261,6 +263,7 @@ void Editor::OpenCourse(int id)
     colors.push_back(SurfaceColor(s));
   collision_mesh_ = renderer_.UploadColored(col.triangles, colors);
   BuildStructures();
+  RefreshHandles();
 
   bool from_mod = false;
   for (const auto& c : courses_)
@@ -472,6 +475,8 @@ void Editor::Undo()
     SetPoly(it.poly, it.before);
   for (const auto& it : e.alive)
     SetAlive(it, !it.alive);
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.before);
   if (!e.items.empty())
     selected_ = e.items.front().index;
   redo_.push_back(e);
@@ -489,6 +494,8 @@ void Editor::Redo()
     SetPoly(it.poly, it.after);
   for (const auto& it : e.alive)
     SetAlive(it, it.alive);
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.after);
   if (!e.items.empty())
     selected_ = e.items.front().index;
   else if (!e.alive.empty() && !e.alive.front().poly && e.alive.front().alive)
@@ -497,6 +504,59 @@ void Editor::Redo()
 }
 
 bool Editor::Modified(int i) const { return !(Get(i) == original_[i]); }
+
+// ---------------------------------------------------------------------------
+// Track spline
+
+void Editor::RefreshHandles()
+{
+  TrackHandle keep = handle_ >= 0 && handle_ < int(handles_.size()) ? handles_[handle_] : TrackHandle{};
+  handles_ = course_ ? course_->TrackHandles() : std::vector<TrackHandle>{};
+  handle_ = -1;
+  for (int i = 0; i < int(handles_.size()); ++i)
+    if (handles_[i].segment == keep.segment && std::fabs(handles_[i].time - keep.time) < 1e-4f)
+      handle_ = i;
+}
+
+void Editor::SetTrackMode(bool on)
+{
+  track_mode_ = on && course_;
+  handle_ = -1;
+  armed_ = -1;
+  if (track_mode_)
+  {
+    selected_ = -1;
+    show_track_ = true;
+    Status("Track editing: click a point on the track line, move it with the gizmo. "
+           "Checkpoints, distances and the checkpoint grid follow; road models and walls do not.");
+  }
+}
+
+void Editor::ApplyCurves(int segment, const Curves& c)
+{
+  course_->SetCurves(segment, c);
+  course_->UpdateTrack();
+  RefreshHandles();
+  dirty_ = true;
+}
+
+void Editor::ResetTrack()
+{
+  UndoEntry e;
+  for (int s = 0; s < int(course_->segments().size()); ++s)
+  {
+    const auto& seg = course_->segments()[s];
+    if (seg.curves != seg.curves_orig)
+      e.curves.push_back({s, seg.curves, seg.curves_orig});
+  }
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.after);
+  if (!e.curves.empty())
+  {
+    undo_.push_back(std::move(e));
+    redo_.clear();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Structures (placing copies of object groups)
@@ -713,10 +773,27 @@ void Editor::Launch()
          !ok);
 }
 
-void Editor::DebugStart(int course, int select, bool collision, int place)
+void Editor::DebugStart(int course, int select, bool collision, int place, int handle, float lift)
 {
   if (course >= 0)
     OpenCourse(course);
+  if (course_ && handle >= 0 && handle < int(handles_.size()))
+  {
+    SetTrackMode(true);
+    handle_ = handle;
+    const TrackHandle h = handles_[handle];
+    const Curves before = course_->segments()[h.segment].curves;
+    course_->MoveHandle(h, before, {0, lift, 0});
+    UndoEntry e;
+    e.curves.push_back({h.segment, before, course_->segments()[h.segment].curves});
+    ApplyCurves(h.segment, e.curves.back().after);
+    undo_.push_back(std::move(e));
+    const Vec3 p = course_->HandlePosition(handles_[handle_]);
+    cam_.yaw = -90;
+    cam_.pitch = -25;
+    cam_.pos = glm::vec3(p[0], p[1], p[2]) - cam_.Forward() * 900.0f;
+    return;
+  }
   if (course_ && place >= 0 && place < int(structures_.size()))
   {
     PlaceStructure(place, structures_[place].anchor + glm::vec3(60, 0, 0));
@@ -896,17 +973,21 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
         gizmo_op_ = 2;
       if (ImGui::IsKeyPressed(ImGuiKey_F))
         FocusSelection();
+      if (ImGui::IsKeyPressed(ImGuiKey_T) && course_)
+        SetTrackMode(!track_mode_);
       if (ImGui::IsKeyPressed(ImGuiKey_Escape))
       {
         if (armed_ >= 0)
           armed_ = -1;
+        else if (track_mode_ && handle_ >= 0)
+          handle_ = -1;
         else
           selected_ = -1;
       }
-      if (ImGui::IsKeyPressed(ImGuiKey_Delete) && course_)
+      if (ImGui::IsKeyPressed(ImGuiKey_Delete) && course_ && !track_mode_)
         DeleteSelection();
     }
-    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && course_)
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && course_ && !track_mode_)
       DuplicateSelection();
   }
 
@@ -989,6 +1070,30 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
         if (!io.KeyShift)
           armed_ = -1;
       }
+    }
+    return;
+  }
+
+  // Track mode: click picks the nearest track point on screen.
+  if (track_mode_)
+  {
+    if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !(handle_ >= 0 && ImGuizmo::IsOver()))
+    {
+      const glm::mat4 vp = proj_ * view_;
+      float best = 14;  // pixels
+      int pick = -1;
+      for (int i = 0; i < int(handles_.size()); ++i)
+      {
+        const Vec3 p = course_->HandlePosition(handles_[i]);
+        const glm::vec4 c = vp * glm::vec4(p[0], p[1], p[2], 1);
+        if (c.w <= 0)
+          continue;
+        const float sx = vx + (c.x / c.w * 0.5f + 0.5f) * vw, sy = vy + (0.5f - c.y / c.w * 0.5f) * vh;
+        const float d = std::hypot(sx - mp.x, sy - mp.y);
+        if (d < best)
+          best = d, pick = i;
+      }
+      handle_ = pick;
     }
     return;
   }
@@ -1076,22 +1181,32 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     if (show_track_)
     {
       const auto& cps = course_->checkpoints();
+      auto v3 = [](const Vec3& v) { return glm::vec3(v[0], v[1], v[2]); };
       for (std::size_t k = 0; k < cps.size(); ++k)
       {
         const auto& cp = cps[k];
-        const glm::vec3 a(cp.start[0], cp.start[1], cp.start[2]), b(cp.end[0], cp.end[1], cp.end[2]);
-        const glm::vec3 n(cp.start_normal[0], cp.start_normal[1], cp.start_normal[2]);
+        const glm::vec3 a = v3(cp.start), b = v3(cp.end);
+        // Centre line, track edges (width along the segment's x axis) and a cross line.
+        const glm::vec3 sa = v3(cp.side0) * (cp.width * 0.5f), sb = v3(cp.side1) * (cp.width * 0.5f);
         lines.push_back({a, Rgba(255, 220, 40)});
         lines.push_back({b, Rgba(255, 220, 40)});
-        // Width marker across the track at each checkpoint start.
-        glm::vec3 side = glm::cross(n, glm::vec3(0, 1, 0));
-        if (glm::length(side) < 1e-3f)
-          side = glm::vec3(1, 0, 0);
-        side = glm::normalize(side) * cp.width * 0.5f;
+        const std::uint32_t edge = Rgba(60, 200, 255, 200);
+        lines.push_back({a - sa, edge});
+        lines.push_back({b - sb, edge});
+        lines.push_back({a + sa, edge});
+        lines.push_back({b + sb, edge});
         const std::uint32_t col = k == 0 ? Rgba(80, 255, 120) : Rgba(255, 220, 40, 110);
-        lines.push_back({a - side, col});
-        lines.push_back({a + side, col});
+        lines.push_back({a - sa, col});
+        lines.push_back({a + sa, col});
       }
+      if (track_mode_)
+        for (int i = 0; i < int(handles_.size()); ++i)
+        {
+          const glm::vec3 p = v3(course_->HandlePosition(handles_[i]));
+          const float r = std::max(2.0f, glm::distance(p, cam_.pos) * 0.008f);
+          AddBox(lines, glm::translate(glm::mat4(1), p), glm::vec3(-r), glm::vec3(r),
+                 i == handle_ ? Rgba(255, 255, 255) : Rgba(255, 140, 40));
+        }
     }
     if (armed_ >= 0 && hover_valid_)
     {
@@ -1155,8 +1270,48 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
   renderer_.DrawLines(lines, false);
   glViewport(0, 0, fb_w, fb_h);
 
+  // Track point gizmo: moves the selected key of the position curves.
+  if (course_ && track_mode_ && handle_ >= 0 && handle_ < int(handles_.size()))
+  {
+    ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
+    ImGuizmo::SetRect(vx, vy, vw, vh);
+    const TrackHandle h = handles_[handle_];
+    const Vec3 p = course_->HandlePosition(h);
+    glm::mat4 M = glm::translate(glm::mat4(1), glm::vec3(p[0], p[1], p[2]));
+    float snap[3] = {snap_move_, snap_move_, snap_move_};
+    const bool changed = ImGuizmo::Manipulate(glm::value_ptr(view_), glm::value_ptr(proj_), ImGuizmo::TRANSLATE,
+                                              ImGuizmo::WORLD, glm::value_ptr(M), nullptr, snap_ ? snap : nullptr);
+    const bool using_now = ImGuizmo::IsUsing();
+    if (using_now && !gizmo_was_using_)
+    {
+      handle_base_ = course_->segments()[h.segment].curves;
+      handle_start_ = p;
+    }
+    if (changed && using_now)
+    {
+      const Vec3 delta = {M[3][0] - handle_start_[0], M[3][1] - handle_start_[1], M[3][2] - handle_start_[2]};
+      course_->MoveHandle(h, handle_base_, delta);
+      course_->UpdateTrack();
+      dirty_ = true;
+    }
+    if (!using_now && gizmo_was_using_)
+    {
+      const Curves& now = course_->segments()[h.segment].curves;
+      if (now != handle_base_)
+      {
+        UndoEntry e;
+        e.curves.push_back({h.segment, handle_base_, now});
+        undo_.push_back(std::move(e));
+        redo_.clear();
+      }
+      RefreshHandles();
+    }
+    gizmo_was_using_ = using_now;
+    return;
+  }
+
   // Gizmo (drawn by ImGui on the background draw list, inside the viewport rect).
-  if (course_ && selected_ >= 0)
+  if (course_ && selected_ >= 0 && !track_mode_)
   {
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(vx, vy, vw, vh);
@@ -1230,6 +1385,11 @@ void Editor::DrawMenu()
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redo_.empty()))
       Redo();
     ImGui::Separator();
+    if (ImGui::MenuItem("Edit track spline", "T", track_mode_, course_.has_value()))
+      SetTrackMode(!track_mode_);
+    if (ImGui::MenuItem("Reset track spline", nullptr, false, course_ && course_->track_modified()))
+      ResetTrack();
+    ImGui::Separator();
     if (ImGui::MenuItem("Duplicate selection", "Ctrl+D", false, selected_ >= 0))
       DuplicateSelection();
     if (ImGui::MenuItem("Delete placed object", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
@@ -1262,6 +1422,8 @@ void Editor::DrawMenu()
         "           mouse wheel = forward/back, middle mouse button = pan\n"
         "Selection: left click in the 3D view or in the object list\n"
         "Gizmo:     W move, E rotate, R scale, F focus\n"
+        "Track:     T toggles track editing: click a point on the track line,\n"
+        "           move it with the gizmo (checkpoints follow, road models do not)\n"
         "Place:     Structures tab, pick an entry, click in the 3D view\n"
         "           (Shift+click places several), Ctrl+D duplicate, Del delete\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
@@ -1465,6 +1627,51 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   {
     ImGui::SetNextItemWidth(100);
     ImGui::DragFloat("Step", gizmo_op_ == 0 ? &snap_move_ : gizmo_op_ == 1 ? &snap_rot_ : &snap_scale_, 0.1f, 0.01f, 1000);
+  }
+
+  if (course_ && ImGui::Checkbox("Edit track spline (T)", &track_mode_))
+    SetTrackMode(track_mode_);
+  if (course_ && track_mode_)
+  {
+    ImGui::SeparatorText("Track point");
+    if (handle_ >= 0 && handle_ < int(handles_.size()))
+    {
+      const TrackHandle& h = handles_[handle_];
+      const auto& seg = course_->segments()[h.segment];
+      const Vec3 p = course_->HandlePosition(h);
+      ImGui::Text("Segment #%d (0x%05X)  t = %.3f", h.segment, seg.offset, h.time);
+      ImGui::Text("Position %.1f  %.1f  %.1f", p[0], p[1], p[2]);
+      ImGui::TextDisabled("Keys: x %zu  y %zu  z %zu", seg.curves[6].size(), seg.curves[7].size(), seg.curves[8].size());
+      if (seg.curves != seg.curves_orig && ImGui::Button("Reset this segment"))
+      {
+        UndoEntry e;
+        e.curves.push_back({h.segment, seg.curves, seg.curves_orig});
+        ApplyCurves(e.curves.back().segment, e.curves.back().after);
+        undo_.push_back(std::move(e));
+        redo_.clear();
+      }
+    }
+    else
+      ImGui::TextDisabled("Click an orange point on the track\nline in the 3D view.");
+    ImGui::SeparatorText("Track");
+    ImGui::Text("Length %.1f%s", course_->track_length(), course_->track_modified() ? " (changed)" : "");
+    ImGui::TextDisabled("%zu segments, %zu checkpoints,\n%zu points", course_->segments().size(),
+                        course_->checkpoints().size(), handles_.size());
+    ImGui::BeginDisabled(!course_->track_modified());
+    if (ImGui::Button("Reset whole track", {-1, 0}))
+      ResetTrack();
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::TextColored({1, 0.8f, 0.3f, 1}, "Moves the drivable path and checkpoints.\n"
+                                           "Road models and static collision (walls)\n"
+                                           "stay where they are.");
+    ImGui::SeparatorText("Course");
+    if (ImGui::Button("Save", {-1, 0}))
+      Save();
+    if (ImGui::Button("Test in game (F5)", {-1, 0}))
+      Launch();
+    ImGui::End();
+    return;
   }
 
   ImGui::SeparatorText("Object");

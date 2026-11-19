@@ -32,8 +32,29 @@ float AngleToDeg(std::int16_t a) { return float(a) * 360.0f / 65536.0f; }
 
 Mat34 ComposeMatrix(const Vec3& p, const std::array<std::int16_t, 3>& rot, const Vec3& s)
 {
-  const float x = AngleToDeg(rot[0]) * kPi / 180, y = AngleToDeg(rot[1]) * kPi / 180,
-              z = AngleToDeg(rot[2]) * kPi / 180;
+  return ComposeMatrixDeg(p, {AngleToDeg(rot[0]), AngleToDeg(rot[1]), AngleToDeg(rot[2])}, s);
+}
+
+Mat34 MulMatrix(const Mat34& a, const Mat34& b)
+{
+  Mat34 m{};
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 4; ++j)
+      m[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + (j == 3 ? a[i * 4 + 3] : 0.0f);
+  return m;
+}
+
+Vec3 TransformPoint(const Mat34& m, const Vec3& p)
+{
+  Vec3 r;
+  for (int i = 0; i < 3; ++i)
+    r[i] = m[i * 4] * p[0] + m[i * 4 + 1] * p[1] + m[i * 4 + 2] * p[2] + m[i * 4 + 3];
+  return r;
+}
+
+Mat34 ComposeMatrixDeg(const Vec3& p, const Vec3& rot, const Vec3& s)
+{
+  const float x = rot[0] * kPi / 180, y = rot[1] * kPi / 180, z = rot[2] * kPi / 180;
   const float cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y),
               cz = std::cos(z), sz = std::sin(z);
   // R = Rz * Ry * Rx
@@ -149,30 +170,8 @@ Course Course::Parse(Bytes data)
       c.scene_objects_.push_back(std::move(so));
     }
 
-  // --- Track checkpoints (centre line + width) ------------------------------
-  const std::uint32_t node_count = U32(d, kTrackNodes);
-  const std::uint32_t nodes = U32(d, kTrackNodes + 4);
-  if (node_count < 100000 && ValidPtr(d, nodes, std::size_t(node_count) * 0x0C))
-  {
-    for (std::uint32_t i = 0; i < node_count; ++i)
-    {
-      const std::uint32_t n = U32(d, nodes + i * 0x0C);
-      const std::uint32_t cps = U32(d, nodes + i * 0x0C + 4);
-      if (n > 64 || !ValidPtr(d, cps, std::size_t(n) * 0x50))
-        continue;
-      for (std::uint32_t k = 0; k < n; ++k)
-      {
-        const std::uint32_t o = cps + k * 0x50;
-        Checkpoint cp;
-        cp.start_normal = ReadVec3(d, o + 0x0C);
-        cp.start = ReadVec3(d, o + 0x18);
-        cp.end_normal = ReadVec3(d, o + 0x28);
-        cp.end = ReadVec3(d, o + 0x34);
-        cp.width = F32(d, o + 0x48);
-        c.checkpoints_.push_back(cp);
-      }
-    }
-  }
+  // --- Track spline + checkpoints (track.cpp) ------------------------------
+  c.ParseTrack();
 
   // --- Static collision (walls, special surfaces) ---------------------------
   const std::uint32_t sc = U32(d, kStaticCollider);
@@ -440,6 +439,8 @@ Bytes Course::Serialize() const
   }
   if (!additions.empty())
     Align(out, 4);
+  if (track_modified_)
+    WriteTrack(out);
 
   auto write_fields = [&](std::uint32_t o, const SceneInstance& in) {
     for (int k = 0; k < 3; ++k)

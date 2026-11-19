@@ -76,6 +76,11 @@ editor under *File → Settings* or with
   track pieces. Click an entry, then click in the 3D view (Shift+click for
   several, Esc cancels). `Ctrl+D` duplicates the selection, `Del` deletes a
   placed object.
+- **Track spline:** `T` (or *Edit → Edit track spline*) shows the points of
+  the track's position curves. Click one and move it with the gizmo. The
+  checkpoints, track distances, track length, distance-based surface areas
+  and the checkpoint grid are recomputed on save. Road models and static
+  collision (walls) do not move along.
 - **Ctrl+Z / Ctrl+Y:** undo / redo.
 - **Ctrl+S:** saves the compressed course into `work/mod/GFZE01`.
 - **F5:** saves and starts the game from the mod folder directly in a race on
@@ -145,7 +150,9 @@ and write to a separate file), `unlz`, `lz`.
 ## Limitations / next steps
 
 - Road models are visuals only: driving surface, physics and AI come from the
-  track spline (yellow line), which cannot be edited yet.
+  track spline. The spline can be edited (see `docs/track-format.md`), but
+  road models and walls stay where they are, and whether the game follows
+  the edited spline is not tested in the game yet.
 - New objects are copies of objects in the same course (same scene object,
   flags and pointers). On save the instance table (header `0x48` count,
   `0x54` pointer) is copied to the end of the file with the new entries
@@ -161,7 +168,7 @@ and write to a separate file), `unlz`, `lz`.
   (e.g. visibility/collision grids) has to be tested in the game.
 - Textures use only the first layer and the first UV set (no multi-texture
   blending, texture scrolling or environment maps).
-- Track spline editing.
+- Generated road models for new track pieces, snapping track pieces together.
 
 ## AI disclosure
 

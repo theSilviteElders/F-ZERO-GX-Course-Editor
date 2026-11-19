@@ -41,8 +41,15 @@ struct AliveItem
   bool alive;  // state after the action
 };
 
+struct CurveUndoItem
+{
+  int segment;
+  Curves before, after;
+};
+
 struct UndoEntry
 {
+  std::vector<CurveUndoItem> curves;  // track spline edits
   std::vector<UndoItem> items;
   std::vector<PolyUndoItem> polys;  // collision polygons carried along (e.g. dash zones)
   std::vector<AliveItem> alive;     // objects/polygons placed or deleted
@@ -80,7 +87,7 @@ public:
   void Frame(int fb_w, int fb_h, float scale, float dt);
   bool WantsQuit() const { return quit_; }
   void RequestQuit();
-  void DebugStart(int course, int select, bool collision, int place = -1);
+  void DebugStart(int course, int select, bool collision, int place = -1, int handle = -1, float lift = 0);
 
 private:
   // Course handling
@@ -112,6 +119,12 @@ private:
   void Redo();
   bool Modified(int i) const;
   bool Alive(int i) const { return !course_->instances()[i].removed; }
+
+  // Track spline editing
+  void RefreshHandles();
+  void SetTrackMode(bool on);
+  void ApplyCurves(int segment, const Curves& c);
+  void ResetTrack();
 
   // Placing structures
   void BuildStructures();
@@ -187,6 +200,13 @@ private:
   // object's own origin, usually placed at (0,0,0).
   bool IsWorldPiece(int i) const;
   bool look_active_ = false;
+
+  // Track spline
+  bool track_mode_ = false;
+  std::vector<TrackHandle> handles_;
+  int handle_ = -1;
+  Curves handle_base_;
+  Vec3 handle_start_{};
 
   // Structures
   std::vector<Structure> structures_;

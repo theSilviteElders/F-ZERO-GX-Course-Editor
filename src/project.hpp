@@ -22,6 +22,8 @@ struct Settings
   std::string launcher = "glinux";  // "glinux" or "dolphin"
   bool quickstart = true;           // start the edited course directly (Practice)
   bool textures = true;             // load and show the original textures (.tpl)
+  bool magnet = true;               // snap moved objects/track points to nearby ones
+  float magnet_radius = 30;         // snapping range in world units
 
   fs::path disc() const { return workspace / "disc"; }
   fs::path mod() const { return workspace / "mod" / "GFZE01"; }

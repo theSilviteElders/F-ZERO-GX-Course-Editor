@@ -129,6 +129,7 @@ the position display still work?
 | Undo / redo | Ctrl+Z / Ctrl+Y |
 | Place a structure | *Structures* tab, click an entry, click in the 3D view |
 | Edit track spline | `T`, click a point, move it with the gizmo |
+| Magnetism on/off | *Magnetism* checkbox (Tool panel), hold Alt to bypass |
 | Duplicate / delete placed object | Ctrl+D / Del |
 | Save / test in game | Ctrl+S / F5 |
 | Textures on/off | *View → Textures* |

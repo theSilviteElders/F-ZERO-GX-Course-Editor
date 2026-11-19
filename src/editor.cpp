@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <unordered_map>
 
 namespace fzgx
 {
@@ -217,6 +220,8 @@ void Editor::CloseCourse()
   background_.clear();
   structures_.clear();
   spawn_groups_.clear();
+  vertex_cache_.clear();
+  snap_line_ = snap_line_draw_ = {};
   handles_.clear();
   handle_ = -1;
   armed_ = -1;
@@ -506,6 +511,119 @@ void Editor::Redo()
 bool Editor::Modified(int i) const { return !(Get(i) == original_[i]); }
 
 // ---------------------------------------------------------------------------
+// Magnetism
+
+bool Editor::MagnetActive() { return project_.settings().magnet && !ImGui::GetIO().KeyAlt; }
+
+const std::vector<glm::vec3>& Editor::BorderVertices(const std::string& name)
+{
+  auto it = vertex_cache_.find(name);
+  if (it != vertex_cache_.end())
+    return it->second;
+  std::vector<glm::vec3>& out = vertex_cache_[name];
+  if (const ModelMesh* m = models_->Find(name))
+  {
+    // Tolerance: 1 % of the extent (at least half a unit) along x and z.
+    const float tx = std::max(0.5f, (m->bounds_max[0] - m->bounds_min[0]) * 0.01f);
+    const float tz = std::max(0.5f, (m->bounds_max[2] - m->bounds_min[2]) * 0.01f);
+    std::set<std::array<long, 3>> seen;
+    for (const auto& p : m->positions)
+    {
+      const bool border = p[0] - m->bounds_min[0] <= tx || m->bounds_max[0] - p[0] <= tx ||
+                          p[2] - m->bounds_min[2] <= tz || m->bounds_max[2] - p[2] <= tz;
+      if (border && seen.insert({std::lround(p[0] * 100), std::lround(p[1] * 100), std::lround(p[2] * 100)}).second)
+        out.emplace_back(p[0], p[1], p[2]);
+    }
+  }
+  return out;
+}
+
+bool Editor::SnapVertices(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                          glm::vec3& offset)
+{
+  const float r = project_.settings().magnet_radius;
+  const auto& list = course_->instances();
+  std::vector<glm::vec3> from;
+  glm::vec3 lo(1e30f), hi(-1e30f);
+  for (int i : sources)
+  {
+    const glm::mat4 M = pre * ToGlm(list[i].matrix);
+    for (const auto& v : BorderVertices(list[i].name))
+    {
+      const glm::vec3 w = glm::vec3(M * glm::vec4(v, 1));
+      from.push_back(w);
+      lo = glm::min(lo, w);
+      hi = glm::max(hi, w);
+    }
+  }
+  if (from.empty())
+    return false;
+  lo -= glm::vec3(r);
+  hi += glm::vec3(r);
+
+  // Vertices of other objects near the moved ones, hashed into cells of size r.
+  auto key = [&](const glm::vec3& p, int dx = 0, int dy = 0, int dz = 0) {
+    const long long x = (long long)std::floor(p.x / r) + dx, y = (long long)std::floor(p.y / r) + dy,
+                    z = (long long)std::floor(p.z / r) + dz;
+    return (x * 73856093LL) ^ (y * 19349663LL) ^ (z * 83492791LL);
+  };
+  std::unordered_map<long long, std::vector<glm::vec3>> cells;
+  for (int j = 0; j < int(list.size()); ++j)
+  {
+    const auto& in = list[j];
+    if (in.removed || IsBackground(j) || std::find(exclude.begin(), exclude.end(), j) != exclude.end())
+      continue;
+    const ModelMesh* m = models_->Find(in.name);
+    if (!m || m->positions.empty())
+      continue;
+    const glm::mat4 M = ToGlm(in.matrix);
+    glm::vec3 blo(1e30f), bhi(-1e30f);
+    for (int c = 0; c < 8; ++c)
+    {
+      const glm::vec3 corner(c & 1 ? m->bounds_max[0] : m->bounds_min[0], c & 2 ? m->bounds_max[1] : m->bounds_min[1],
+                             c & 4 ? m->bounds_max[2] : m->bounds_min[2]);
+      const glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1));
+      blo = glm::min(blo, w);
+      bhi = glm::max(bhi, w);
+    }
+    if (glm::any(glm::lessThan(bhi, lo)) || glm::any(glm::greaterThan(blo, hi)))
+      continue;
+    for (const auto& v : BorderVertices(in.name))
+    {
+      const glm::vec3 w = glm::vec3(M * glm::vec4(v, 1));
+      if (glm::all(glm::greaterThanEqual(w, lo)) && glm::all(glm::lessThanEqual(w, hi)))
+        cells[key(w)].push_back(w);
+    }
+  }
+  if (cells.empty())
+    return false;
+  float best = r * r;
+  bool found = false;
+  for (const auto& p : from)
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+          auto it = cells.find(key(p, dx, dy, dz));
+          if (it == cells.end())
+            continue;
+          for (const auto& q : it->second)
+          {
+            const glm::vec3 d = q - p;
+            const float d2 = glm::dot(d, d);
+            if (d2 < best)
+            {
+              best = d2;
+              found = true;
+              offset = d;
+              snap_line_ = {true, p, q};
+            }
+          }
+        }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
 // Track spline
 
 void Editor::RefreshHandles()
@@ -673,10 +791,10 @@ std::vector<int> Editor::Spawn(const std::vector<int>& members, const std::vecto
   return made;
 }
 
-void Editor::PlaceStructure(int s, const glm::vec3& target)
+void Editor::PlaceStructure(int s, const glm::vec3& offset)
 {
   const Structure& st = structures_.at(std::size_t(s));
-  Spawn(st.members, st.polys, target - st.anchor);
+  Spawn(st.members, st.polys, offset);
   Status("Placed " + st.label + (st.polys.empty() ? "" : " with " + std::to_string(st.polys.size()) + " collision polygons") +
          ". Ctrl+Z undoes, Del deletes it again.");
 }
@@ -796,7 +914,16 @@ void Editor::DebugStart(int course, int select, bool collision, int place, int h
   }
   if (course_ && place >= 0 && place < int(structures_.size()))
   {
-    PlaceStructure(place, structures_[place].anchor + glm::vec3(60, 0, 0));
+    // Like a click next to the original; magnetism applies as in the 3D view.
+    glm::vec3 offset(60, 0, 0);
+    if (const char* env = std::getenv("FZGX_PLACE_OFFSET"))
+      std::sscanf(env, "%f %f %f", &offset.x, &offset.y, &offset.z);
+    if (glm::vec3 snap; MagnetActive() && SnapVertices(structures_[place].members, {}, glm::translate(glm::mat4(1), offset), snap))
+    {
+      std::printf("magnet: offset %.2f %.2f %.2f snapped by %.2f %.2f %.2f\n", offset.x, offset.y, offset.z, snap.x, snap.y, snap.z);
+      offset += snap;
+    }
+    PlaceStructure(place, offset);
     open_structures_tab_ = true;
     FocusSelection();
     return;
@@ -991,6 +1118,8 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
       DuplicateSelection();
   }
 
+  snap_line_draw_ = snap_line_;
+  snap_line_ = {};
   ImGuizmo::BeginFrame();
   DrawMenu();
   DrawCoursePanel(0, menu_h, kLeftWidth, H - menu_h - kStatusHeight);
@@ -1064,9 +1193,13 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
         hover_ = ray_o + ray_d * 300.0f;
         hover_valid_ = true;
       }
+      const Structure& st = structures_[armed_];
+      place_offset_ = hover_ - st.anchor;
+      if (glm::vec3 snap; MagnetActive() && SnapVertices(st.members, {}, glm::translate(glm::mat4(1), place_offset_), snap))
+        place_offset_ += snap;
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
       {
-        PlaceStructure(armed_, hover_);
+        PlaceStructure(armed_, place_offset_);
         if (!io.KeyShift)
           armed_ = -1;
       }
@@ -1208,11 +1341,20 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
                  i == handle_ ? Rgba(255, 255, 255) : Rgba(255, 140, 40));
         }
     }
+    if (snap_line_draw_.valid)
+    {
+      // Magnetism: the vertex that snapped and its target.
+      const glm::vec3 a = snap_line_draw_.from, b = snap_line_draw_.to;
+      const float r = std::max(1.5f, glm::distance(b, cam_.pos) * 0.006f);
+      lines.push_back({a, Rgba(255, 60, 255)});
+      lines.push_back({b, Rgba(255, 60, 255)});
+      AddBox(lines, glm::translate(glm::mat4(1), b), glm::vec3(-r), glm::vec3(r), Rgba(255, 60, 255));
+    }
     if (armed_ >= 0 && hover_valid_)
     {
       // Preview of the structure being placed.
       const Structure& st = structures_[armed_];
-      const glm::vec3 off = hover_ - st.anchor;
+      const glm::vec3 off = place_offset_;
       const glm::mat4 T = glm::translate(glm::mat4(1), off);
       for (int m : st.members)
       {
@@ -1289,7 +1431,26 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     }
     if (changed && using_now)
     {
-      const Vec3 delta = {M[3][0] - handle_start_[0], M[3][1] - handle_start_[1], M[3][2] - handle_start_[2]};
+      Vec3 delta = {M[3][0] - handle_start_[0], M[3][1] - handle_start_[1], M[3][2] - handle_start_[2]};
+      if (MagnetActive())
+      {
+        // Snap onto another track point (e.g. to join two segments).
+        const glm::vec3 target(M[3]);
+        float best = project_.settings().magnet_radius;
+        for (int i = 0; i < int(handles_.size()); ++i)
+        {
+          if (i == handle_)
+            continue;
+          const Vec3 q = course_->HandlePosition(handles_[i]);
+          const float d = glm::distance(target, glm::vec3(q[0], q[1], q[2]));
+          if (d < best)
+          {
+            best = d;
+            delta = {q[0] - handle_start_[0], q[1] - handle_start_[1], q[2] - handle_start_[2]};
+            snap_line_ = {true, target, glm::vec3(q[0], q[1], q[2])};
+          }
+        }
+      }
       course_->MoveHandle(h, handle_base_, delta);
       course_->UpdateTrack();
       dirty_ = true;
@@ -1338,6 +1499,19 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         t.rotation = {DegToAngle(rot[0]), DegToAngle(rot[1]), DegToAngle(rot[2])};
         t.scale = scl;
         t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+        if (gizmo_op_ == 0 && MagnetActive())
+        {
+          // Snap a vertex of the moved object onto a vertex of another one.
+          std::vector<int> exclude = Linked(selected_);
+          exclude.push_back(selected_);
+          const glm::mat4 pre = ToGlm(t.matrix) * glm::inverse(ToGlm(course_->instances()[selected_].matrix));
+          if (glm::vec3 snap; SnapVertices({selected_}, exclude, pre, snap))
+          {
+            for (int k = 0; k < 3; ++k)
+              t.position[k] += snap[k];
+            t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+          }
+        }
         ApplyPrimary(t);
       }
     }
@@ -1424,6 +1598,8 @@ void Editor::DrawMenu()
         "Gizmo:     W move, E rotate, R scale, F focus\n"
         "Track:     T toggles track editing: click a point on the track line,\n"
         "           move it with the gizmo (checkpoints follow, road models do not)\n"
+        "Magnetism: moved objects snap onto nearby vertices, track points onto\n"
+        "           other track points (Tool panel), hold Alt to move freely\n"
         "Place:     Structures tab, pick an entry, click in the 3D view\n"
         "           (Shift+click places several), Ctrl+D duplicate, Del delete\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
@@ -1623,6 +1799,24 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   ImGui::RadioButton("Scale (R)", &gizmo_op_, 2);
   ImGui::Checkbox("Local axes", &gizmo_local_);
   ImGui::Checkbox("Snap", &snap_);
+  {
+    Settings& st = project_.settings();
+    if (ImGui::Checkbox("Magnetism", &st.magnet))
+      st.Save();
+    ImGui::SetItemTooltip("Moved objects and track points snap onto nearby vertices / track points.\n"
+                          "Hold Alt to move freely.");
+    if (st.magnet)
+    {
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(80);
+      if (ImGui::DragFloat("Range", &st.magnet_radius, 0.5f, 1, 1000, "%.0f"))
+        st.magnet_radius = std::clamp(st.magnet_radius, 1.0f, 1000.0f);
+      if (ImGui::IsItemDeactivatedAfterEdit())
+        st.Save();
+      if (ImGui::GetIO().KeyAlt)
+        ImGui::TextColored({1, 0.6f, 1, 1}, "Alt held: magnetism off");
+    }
+  }
   if (snap_)
   {
     ImGui::SetNextItemWidth(100);

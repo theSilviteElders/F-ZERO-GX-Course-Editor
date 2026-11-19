@@ -80,6 +80,10 @@ void Settings::Load()
       quickstart = value != "0" && value != "false";
     else if (key == "textures")
       textures = value != "0" && value != "false";
+    else if (key == "magnet")
+      magnet = value != "0" && value != "false";
+    else if (key == "magnet_radius")
+      magnet_radius = std::clamp(std::strtof(value.c_str(), nullptr), 1.0f, 1000.0f);
   }
 }
 
@@ -94,7 +98,9 @@ void Settings::Save() const
       << "glinux_user_dir=" << glinux_user_dir.string() << "\n"
       << "launcher=" << launcher << "\n"
       << "quickstart=" << (quickstart ? "true" : "false") << "\n"
-      << "textures=" << (textures ? "true" : "false") << "\n";
+      << "textures=" << (textures ? "true" : "false") << "\n"
+      << "magnet=" << (magnet ? "true" : "false") << "\n"
+      << "magnet_radius=" << magnet_radius << "\n";
 }
 
 std::string Project::CourseFile(int id)

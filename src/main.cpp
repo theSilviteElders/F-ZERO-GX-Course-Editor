@@ -100,7 +100,8 @@ int main(int argc, char** argv)
     else if (a == "--select" && i + 1 < argc)
       start_select = std::atoi(argv[++i]);
     else if (a == "--place" && i + 1 < argc)
-      start_place = std::atoi(argv[++i]);  // place structure S next to its original, select it
+      start_place = std::atoi(argv[++i]);  // place structure S next to its original (offset 60 0 0 or
+                                           // env FZGX_PLACE_OFFSET="x y z", magnetism applies), select it
     else if (a == "--track-lift" && i + 2 < argc)
     {
       start_handle = std::atoi(argv[++i]);  // track mode, move point H up by DY

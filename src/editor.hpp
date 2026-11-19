@@ -126,11 +126,21 @@ private:
   void ApplyCurves(int segment, const Curves& c);
   void ResetTrack();
 
+  // Magnetism: snapping to nearby vertices / track points (off while Alt is held).
+  bool MagnetActive();
+  // Offset that puts a border vertex of `sources` (instance matrices pre-multiplied
+  // by `pre`) onto the nearest border vertex of another object within the range.
+  bool SnapVertices(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                    glm::vec3& offset);
+  // Border vertices of a model (cached): unique vertices on the four
+  // horizontal sides of its bounding box, where pieces connect (road ends).
+  const std::vector<glm::vec3>& BorderVertices(const std::string& name);
+
   // Placing structures
   void BuildStructures();
   // Copies objects + polygons, moved by `offset`; one undo step. Returns the new objects.
   std::vector<int> Spawn(const std::vector<int>& members, const std::vector<int>& polys, const glm::vec3& offset);
-  void PlaceStructure(int s, const glm::vec3& target);
+  void PlaceStructure(int s, const glm::vec3& offset);
   void DuplicateSelection();
   void DeleteSelection();
   void SetAlive(const AliveItem& item, bool alive);
@@ -215,6 +225,16 @@ private:
   bool open_structures_tab_ = false;
   bool hover_valid_ = false;
   glm::vec3 hover_{0};
+  glm::vec3 place_offset_{0};  // offset of the structure preview (after snapping)
+
+  // Magnetism feedback: snapped pair of points (drawn one frame later).
+  struct SnapLine
+  {
+    bool valid = false;
+    glm::vec3 from{0}, to{0};
+  };
+  SnapLine snap_line_, snap_line_draw_;
+  std::map<std::string, std::vector<glm::vec3>> vertex_cache_;
   // Placed object -> the objects and polygons placed together with it.
   std::map<int, std::pair<std::vector<int>, std::vector<int>>> spawn_groups_;
 

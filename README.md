@@ -81,6 +81,14 @@ editor under *File → Settings* or with
   checkpoints, track distances, track length, distance-based surface areas
   and the checkpoint grid are recomputed on save. Road models and static
   collision (walls) do not move along.
+- **Magnetism:** when moving an object with the gizmo or placing a
+  structure, the closest border vertex of the moved model snaps onto a
+  border vertex of another model within the range (border = vertices on the
+  four horizontal sides of the model's bounding box, e.g. the ends of road
+  pieces, so they join edge to edge); track
+  points snap onto other track points. A pink line shows the snapped pair.
+  Switch it off with the *Magnetism* checkbox (saved in `work/editor.ini`
+  together with the range) or hold **Alt** to move freely for a moment.
 - **Ctrl+Z / Ctrl+Y:** undo / redo.
 - **Ctrl+S:** saves the compressed course into `work/mod/GFZE01`.
 - **F5:** saves and starts the game from the mod folder directly in a race on

@@ -99,8 +99,12 @@ for _ in $(seq 1 600); do
     sleep 0.1
 done
 
+# Command values must not contain spaces (the runner splits a command file into
+# key=value lines), so the savestate is passed as a path relative to the
+# automation folder (hard link or copy of the real file).
 if [[ -f "$state" ]]; then
-    cmd "command=load_state path=$state"
+    ln -f "$state" "$auto/quickstart.sav" 2>/dev/null || cp --reflink=auto "$state" "$auto/quickstart.sav"
+    cmd "command=load_state path=quickstart.sav"
     sleep 1.5
 else
     echo "[run-test] building quick-start savestate (one time, about 30 s)"
@@ -119,8 +123,9 @@ else
         echo "[run-test] menu navigation did not reach the course selection; staying in the menu" >&2
         wait "$pid"; exit 0
     fi
-    cmd "command=save_state path=$state"
+    cmd "command=save_state path=quickstart.sav"
     sleep 1.5                # saving pauses the core; inputs sent now would be lost
+    mv -f "$auto/quickstart.sav" "$state"
     echo "[run-test] savestate written: $state"
 fi
 

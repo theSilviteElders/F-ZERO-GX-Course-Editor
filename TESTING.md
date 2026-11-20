@@ -134,7 +134,9 @@ saving restores the original files.
   from GLINUX, delete `work/test-userdir`; it is copied again on the next test.
 - If the direct start gets stuck (e.g. the game stays in a menu), delete
   `work/glinux-runtime/quickstart-practice.sav`; it is rebuilt on the next
-  start.
+  start. Before the fix for workspace paths containing spaces the savestate
+  could not be loaded at all and the game stayed in the menu (`launch.log`:
+  "command failed: command=load_state").
 
 ## Editor controls
 

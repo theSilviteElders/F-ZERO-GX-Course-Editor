@@ -69,7 +69,8 @@ editor under *File → Settings* or with
   mouse wheel moves forward/back, middle mouse button pans.
 - **Selection:** left click in the 3D view or in the object list
   (double click focuses), `F` focuses, `Esc` clears the selection.
-- **Gizmo:** `W` move, `E` rotate, `R` scale; optional snapping.
+- **Gizmo:** `W` move, `E` rotate, `R` scale; optional snapping. The gizmo sits
+  at the model centre; scaling keeps the object (and its linked objects) in place.
   Values can also be typed into the inspector on the right.
 - **Structures:** the *Structures* tab lists placeable copies of what the
   course already contains, grouped into boost & special zones (e.g. dash

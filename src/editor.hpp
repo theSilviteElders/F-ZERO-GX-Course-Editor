@@ -89,6 +89,8 @@ public:
   void RequestQuit();
   void DebugStart(int course, int select, bool collision, int place = -1, int handle = -1, float lift = 0);
   void ShowCups() { show_cups_ = true; }
+  // Scales the selection like the inspector does and prints the model centres (testing).
+  void DebugScale(float factor);
 
 private:
   // Course handling
@@ -114,7 +116,13 @@ private:
   std::vector<int> AttachedPolys(const std::vector<int>& objects, bool force = false) const;
   void SetPoly(int p, const std::vector<Vec3>& v);
   void BeginEdit();
-  void ApplyPrimary(const Transform& t);
+  // scale_in_place: a scale edit; linked objects are scaled by the same factor
+  // around their own centre instead of following the primary's transform.
+  void ApplyPrimary(const Transform& t, bool scale_in_place = false);
+  // Model centre in object space (bounding box centre, 0 for placeholders).
+  glm::vec3 LocalCenter(int i) const;
+  // `from` scaled by `factor` (per local axis) so that the model centre stays put.
+  Transform ScaledInPlace(int i, const Transform& from, const Vec3& factor) const;
   void EndEdit();
   void Undo();
   void Redo();

@@ -425,18 +425,52 @@ void Editor::BeginEdit()
   editing_ = true;
 }
 
-void Editor::ApplyPrimary(const Transform& t)
+glm::vec3 Editor::LocalCenter(int i) const
+{
+  const ModelMesh* m = models_->Find(course_->instances()[i].name);
+  if (!m || m->positions.empty())
+    return glm::vec3(0);
+  return glm::vec3(m->bounds_min[0] + m->bounds_max[0], m->bounds_min[1] + m->bounds_max[1],
+                   m->bounds_min[2] + m->bounds_max[2]) * 0.5f;
+}
+
+Transform Editor::ScaledInPlace(int i, const Transform& from, const Vec3& factor) const
+{
+  const glm::vec3 c = LocalCenter(i);
+  const glm::vec3 centre = glm::vec3(ToGlm(from.matrix) * glm::vec4(c, 1));
+  Transform t = from;
+  for (int k = 0; k < 3; ++k)
+    t.scale[k] = from.scale[k] * factor[k];
+  t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+  const glm::vec3 moved = glm::vec3(ToGlm(t.matrix) * glm::vec4(c, 1));
+  for (int k = 0; k < 3; ++k)
+    t.position[k] += centre[k] - moved[k];
+  t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+  return t;
+}
+
+void Editor::ApplyPrimary(const Transform& t, bool scale_in_place)
 {
   if (!editing_)
     BeginEdit();
   if (edit_snapshot_.empty())
     return;
-  const glm::mat4 before = ToGlm(edit_snapshot_[0].second.matrix);
+  const Transform& start = edit_snapshot_[0].second;
+  const glm::mat4 before = ToGlm(start.matrix);
   Set(edit_snapshot_[0].first, t);
   // Same world-space change for every linked object (relative to the start of the edit).
   const glm::mat4 delta = ToGlm(t.matrix) * glm::inverse(before);
+  Vec3 factor{1, 1, 1};
+  for (int k = 0; k < 3; ++k)
+    factor[k] = std::fabs(start.scale[k]) > 1e-6f ? t.scale[k] / start.scale[k] : 1.0f;
   for (std::size_t k = 1; k < edit_snapshot_.size(); ++k)
-    SetFromMatrix(edit_snapshot_[k].first, FromGlm(delta * ToGlm(edit_snapshot_[k].second.matrix)));
+  {
+    const auto& [j, from] = edit_snapshot_[k];
+    if (scale_in_place)
+      Set(j, ScaledInPlace(j, from, factor));
+    else
+      SetFromMatrix(j, FromGlm(delta * ToGlm(from.matrix)));
+  }
   for (const auto& [p, verts] : poly_snapshot_)
   {
     std::vector<Vec3> moved;
@@ -941,6 +975,29 @@ void Editor::DebugStart(int course, int select, bool collision, int place, int h
     FocusSelection();
   }
   show_collision_ |= collision;
+}
+
+void Editor::DebugScale(float factor)
+{
+  if (!course_ || selected_ < 0)
+    return;
+  std::vector<int> objs{selected_};
+  for (int j : Linked(selected_))
+    objs.push_back(j);
+  auto centre = [&](int i) { return glm::vec3(ToGlm(course_->instances()[i].matrix) * glm::vec4(LocalCenter(i), 1)); };
+  std::vector<glm::vec3> before;
+  for (int i : objs)
+    before.push_back(centre(i));
+  BeginEdit();
+  ApplyPrimary(ScaledInPlace(selected_, Get(selected_), {factor, factor, factor}), true);
+  EndEdit();
+  for (std::size_t k = 0; k < objs.size(); ++k)
+  {
+    const glm::vec3 a = before[k], b = centre(objs[k]);
+    std::printf("scale: #%d %s centre %.2f %.2f %.2f -> %.2f %.2f %.2f, scale x %.3f\n", objs[k],
+                course_->instances()[objs[k]].name.c_str(), a.x, a.y, a.z, b.x, b.y, b.z,
+                course_->instances()[objs[k]].scale[0]);
+  }
 }
 
 void Editor::RequestQuit()
@@ -1483,7 +1540,10 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
   {
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(vx, vy, vw, vh);
-    glm::mat4 M = ToGlm(course_->instances()[selected_].matrix);
+    // The gizmo sits at the model centre, so rotating and scaling keep the
+    // object in place (track pieces have their origin far away at 0,0,0).
+    const glm::vec3 pivot = LocalCenter(selected_);
+    glm::mat4 M = ToGlm(course_->instances()[selected_].matrix) * glm::translate(glm::mat4(1), pivot);
     const ImGuizmo::OPERATION op = gizmo_op_ == 0 ? ImGuizmo::TRANSLATE
                                    : gizmo_op_ == 1 ? ImGuizmo::ROTATE
                                                     : ImGuizmo::SCALE;
@@ -1498,6 +1558,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
       BeginEdit();
     if (changed)
     {
+      M = M * glm::translate(glm::mat4(1), -pivot);
       Vec3 pos, rot, scl;
       if (DecomposeMatrix(FromGlm(M), pos, rot, scl))
       {
@@ -1506,6 +1567,16 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         t.rotation = {DegToAngle(rot[0]), DegToAngle(rot[1]), DegToAngle(rot[2])};
         t.scale = scl;
         t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+        if (gizmo_op_ == 2)
+        {
+          // Only the scale changes: rebuild from the current transform so that
+          // the quantised rotation cannot shift the centre.
+          const Transform cur = Get(selected_);
+          Vec3 f{1, 1, 1};
+          for (int k = 0; k < 3; ++k)
+            f[k] = std::fabs(cur.scale[k]) > 1e-6f ? std::fabs(scl[k] / cur.scale[k]) : 1.0f;  // decomposition may flip signs
+          t = ScaledInPlace(selected_, cur, f);
+        }
         if (gizmo_op_ == 0 && MagnetActive())
         {
           // Snap a vertex of the moved object onto a vertex of another one.
@@ -1519,7 +1590,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
             t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
           }
         }
-        ApplyPrimary(t);
+        ApplyPrimary(t, gizmo_op_ == 2);
       }
     }
     if (!using_now && gizmo_was_using_)
@@ -1913,7 +1984,8 @@ void Editor::DrawInspector(float x, float y, float w, float h)
 
   Transform t = Get(selected_);
   Vec3 rot_deg = {AngleToDeg(t.rotation[0]), AngleToDeg(t.rotation[1]), AngleToDeg(t.rotation[2])};
-  bool changed = false, activated = false, deactivated = false;
+  bool changed = false, activated = false, deactivated = false, scale_changed = false;
+  const Vec3 scale_before = t.scale;
   auto track = [&](bool c) {
     changed |= c;
     activated |= ImGui::IsItemActivated();
@@ -1931,19 +2003,31 @@ void Editor::DrawInspector(float x, float y, float w, float h)
       const float f = t.scale[0] != 0 ? s / t.scale[0] : 1;
       for (auto& v : t.scale)
         v = v * f;
-      changed = true;
+      scale_changed = true;
     }
     activated |= ImGui::IsItemActivated();
     deactivated |= ImGui::IsItemDeactivatedAfterEdit();
   }
   else
-    track(ImGui::DragFloat3("Scale", t.scale.data(), 0.01f, 0.001f, 1000, "%.3f"));
+  {
+    scale_changed = ImGui::DragFloat3("Scale", t.scale.data(), 0.01f, 0.001f, 1000, "%.3f");
+    activated |= ImGui::IsItemActivated();
+    deactivated |= ImGui::IsItemDeactivatedAfterEdit();
+  }
   ImGui::PopItemWidth();
   ImGui::Checkbox("Uniform scale", &uniform);
 
   if (activated)
     BeginEdit();
-  if (changed)
+  if (scale_changed && !changed)
+  {
+    // Scaling keeps the model centre (and linked objects) in place.
+    Vec3 f{1, 1, 1};
+    for (int k = 0; k < 3; ++k)
+      f[k] = std::fabs(scale_before[k]) > 1e-6f ? t.scale[k] / scale_before[k] : 1.0f;
+    ApplyPrimary(ScaledInPlace(selected_, Get(selected_), f), true);
+  }
+  else if (changed || scale_changed)
   {
     t.rotation = {DegToAngle(rot_deg[0]), DegToAngle(rot_deg[1]), DegToAngle(rot_deg[2])};
     t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);

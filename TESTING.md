@@ -36,7 +36,10 @@ the game.
 the same spot: the plate (`DASH01_BOARD`), the arrow marker
 (`DASH01_SIGN_A_LOD`) and the ring (`DASH01_SIGN_CIRCLE_A_LOD`). With
 *Move linked objects along* (on by default) they are moved, rotated and scaled
-together. They are highlighted as well and listed on the right. Objects are
+together. Scaling keeps every object where it is: each one grows around its
+own model centre (the gizmo sits at the centre of the selected model, so road
+pieces whose origin is at 0,0,0 also scale and rotate in place). They are
+highlighted as well and listed on the right. Objects are
 linked when they share the name prefix (e.g. `DASH01`) and lie within the
 radius.
 

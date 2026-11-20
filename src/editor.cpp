@@ -10,7 +10,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <unordered_map>
 
 namespace fzgx
 {
@@ -94,6 +98,13 @@ bool RayBox(const glm::vec3& o, const glm::vec3& d, const glm::vec3& mn, const g
 
 const glm::vec3 kMissingMin(-8, -8, -8), kMissingMax(8, 8, 8);
 
+const char* const kStructureCategories[] = {
+    "Boost & special zones",       // groups with collision polygons (dash plates ...)
+    "Object groups",               // several linked objects
+    "Single objects",
+    "Track pieces (visual only)",  // road/guardrail models placed at the origin
+};
+
 // Placeholder boxes keep a fixed size: strip the scale from the instance matrix.
 glm::mat4 WithoutScale(const glm::mat4& m)
 {
@@ -120,6 +131,8 @@ Editor::Editor(Settings settings) : project_(std::move(settings)) {}
 
 Editor::~Editor()
 {
+  for (auto& t : cup_icons_)
+    renderer_.FreeTexture(t);
   CloseCourse();
   renderer_.Shutdown();
 }
@@ -129,6 +142,7 @@ bool Editor::Init()
   if (!renderer_.Init())
     return false;
   RefreshCourses();
+  cups_ = LoadCups(project_.settings().cups_file());
   if (!project_.DiscReady())
   {
     show_settings_ = true;
@@ -208,6 +222,14 @@ void Editor::CloseCourse()
   original_.clear();
   original_polys_.clear();
   background_.clear();
+  structures_.clear();
+  spawn_groups_.clear();
+  vertex_cache_.clear();
+  snap_line_ = snap_line_draw_ = {};
+  handles_.clear();
+  handle_ = -1;
+  armed_ = -1;
+  hover_valid_ = false;
   undo_.clear();
   redo_.clear();
   selected_ = -1;
@@ -249,6 +271,8 @@ void Editor::OpenCourse(int id)
   for (int s : col.surface)
     colors.push_back(SurfaceColor(s));
   collision_mesh_ = renderer_.UploadColored(col.triangles, colors);
+  BuildStructures();
+  RefreshHandles();
 
   bool from_mod = false;
   for (const auto& c : courses_)
@@ -292,6 +316,20 @@ void Editor::SetFromMatrix(int i, const Mat34& m)
   Set(i, t);
 }
 
+bool Editor::IsWorldPiece(int i) const
+{
+  const auto& in = course_->instances()[i];
+  const glm::vec3 p(in.matrix[3], in.matrix[7], in.matrix[11]);
+  if (glm::length(p) < 1.0f)
+    return true;
+  const ModelMesh* m = models_->Find(in.name);
+  if (!m || m->positions.empty())
+    return false;
+  const glm::vec3 a(m->bounds_min[0], m->bounds_min[1], m->bounds_min[2]);
+  const glm::vec3 b(m->bounds_max[0], m->bounds_max[1], m->bounds_max[2]);
+  return glm::length((a + b) * 0.5f) > std::max(100.0f, glm::length(b - a) * 0.5f);
+}
+
 std::vector<int> Editor::Linked(int i) const
 {
   std::vector<int> out;
@@ -300,34 +338,33 @@ std::vector<int> Editor::Linked(int i) const
   const auto& list = course_->instances();
   auto prefix = [](const std::string& n) { return n.substr(0, n.find('_')); };
   const glm::vec3 p(list[i].matrix[3], list[i].matrix[7], list[i].matrix[11]);
-  // Track pieces (roads, guardrails) all sit at the world origin: never link those.
-  if (glm::length(p) < 1.0f || list[i].name.empty())
+  // Track pieces (roads, guardrails) mostly sit at the world origin: never link those.
+  if (list[i].name.empty() || IsWorldPiece(i))
     return out;
   const std::string pre = prefix(list[i].name);
   for (int j = 0; j < int(list.size()); ++j)
   {
-    if (j == i || IsBackground(j) || prefix(list[j].name) != pre)
+    if (j == i || list[j].removed || IsBackground(j) || prefix(list[j].name) != pre)
       continue;
     const glm::vec3 q(list[j].matrix[3], list[j].matrix[7], list[j].matrix[11]);
-    if (glm::length(q) >= 1.0f && glm::distance(p, q) <= link_radius_)
+    if (glm::distance(p, q) <= link_radius_ && !IsWorldPiece(j))
       out.push_back(j);
   }
   return out;
 }
 
-std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects) const
+std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects, bool force) const
 {
   std::vector<int> out;
-  if (!course_ || !move_collision_)
+  if (!course_ || (!move_collision_ && !force))
     return out;
   const auto& polys = course_->polys();
   std::vector<char> taken(polys.size(), 0);
   for (int i : objects)
   {
     const auto& in = course_->instances()[i];
-    const glm::vec3 pos(in.matrix[3], in.matrix[7], in.matrix[11]);
-    if (glm::length(pos) < 1.0f || IsBackground(i))
-      continue;  // track pieces at the origin / huge scenery: never grab collision
+    if (IsWorldPiece(i) || IsBackground(i))
+      continue;  // track pieces / huge scenery: never grab collision
     const ModelMesh* m = models_->Find(in.name);
     if (!m || m->positions.empty())
       continue;
@@ -340,7 +377,7 @@ std::vector<int> Editor::AttachedPolys(const std::vector<int>& objects) const
     mx += pad;
     for (int p = 0; p < int(polys.size()); ++p)
     {
-      if (taken[p])
+      if (taken[p] || polys[p].removed)
         continue;
       bool inside = true;
       for (const auto& v : polys[p].v)
@@ -445,6 +482,10 @@ void Editor::Undo()
     Set(it.index, it.before);
   for (const auto& it : e.polys)
     SetPoly(it.poly, it.before);
+  for (const auto& it : e.alive)
+    SetAlive(it, !it.alive);
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.before);
   if (!e.items.empty())
     selected_ = e.items.front().index;
   redo_.push_back(e);
@@ -460,12 +501,370 @@ void Editor::Redo()
     Set(it.index, it.after);
   for (const auto& it : e.polys)
     SetPoly(it.poly, it.after);
+  for (const auto& it : e.alive)
+    SetAlive(it, it.alive);
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.after);
   if (!e.items.empty())
     selected_ = e.items.front().index;
+  else if (!e.alive.empty() && !e.alive.front().poly && e.alive.front().alive)
+    selected_ = e.alive.front().index;
   undo_.push_back(e);
 }
 
 bool Editor::Modified(int i) const { return !(Get(i) == original_[i]); }
+
+// ---------------------------------------------------------------------------
+// Magnetism
+
+bool Editor::MagnetActive() { return project_.settings().magnet && !ImGui::GetIO().KeyAlt; }
+
+const std::vector<glm::vec3>& Editor::BorderVertices(const std::string& name)
+{
+  auto it = vertex_cache_.find(name);
+  if (it != vertex_cache_.end())
+    return it->second;
+  std::vector<glm::vec3>& out = vertex_cache_[name];
+  if (const ModelMesh* m = models_->Find(name))
+  {
+    // Tolerance: 1 % of the extent (at least half a unit) along x and z.
+    const float tx = std::max(0.5f, (m->bounds_max[0] - m->bounds_min[0]) * 0.01f);
+    const float tz = std::max(0.5f, (m->bounds_max[2] - m->bounds_min[2]) * 0.01f);
+    std::set<std::array<long, 3>> seen;
+    for (const auto& p : m->positions)
+    {
+      const bool border = p[0] - m->bounds_min[0] <= tx || m->bounds_max[0] - p[0] <= tx ||
+                          p[2] - m->bounds_min[2] <= tz || m->bounds_max[2] - p[2] <= tz;
+      if (border && seen.insert({std::lround(p[0] * 100), std::lround(p[1] * 100), std::lround(p[2] * 100)}).second)
+        out.emplace_back(p[0], p[1], p[2]);
+    }
+  }
+  return out;
+}
+
+bool Editor::SnapVertices(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                          glm::vec3& offset)
+{
+  const float r = project_.settings().magnet_radius;
+  const auto& list = course_->instances();
+  std::vector<glm::vec3> from;
+  glm::vec3 lo(1e30f), hi(-1e30f);
+  for (int i : sources)
+  {
+    const glm::mat4 M = pre * ToGlm(list[i].matrix);
+    for (const auto& v : BorderVertices(list[i].name))
+    {
+      const glm::vec3 w = glm::vec3(M * glm::vec4(v, 1));
+      from.push_back(w);
+      lo = glm::min(lo, w);
+      hi = glm::max(hi, w);
+    }
+  }
+  if (from.empty())
+    return false;
+  lo -= glm::vec3(r);
+  hi += glm::vec3(r);
+
+  // Vertices of other objects near the moved ones, hashed into cells of size r.
+  auto key = [&](const glm::vec3& p, int dx = 0, int dy = 0, int dz = 0) {
+    const long long x = (long long)std::floor(p.x / r) + dx, y = (long long)std::floor(p.y / r) + dy,
+                    z = (long long)std::floor(p.z / r) + dz;
+    return (x * 73856093LL) ^ (y * 19349663LL) ^ (z * 83492791LL);
+  };
+  std::unordered_map<long long, std::vector<glm::vec3>> cells;
+  for (int j = 0; j < int(list.size()); ++j)
+  {
+    const auto& in = list[j];
+    if (in.removed || IsBackground(j) || std::find(exclude.begin(), exclude.end(), j) != exclude.end())
+      continue;
+    const ModelMesh* m = models_->Find(in.name);
+    if (!m || m->positions.empty())
+      continue;
+    const glm::mat4 M = ToGlm(in.matrix);
+    glm::vec3 blo(1e30f), bhi(-1e30f);
+    for (int c = 0; c < 8; ++c)
+    {
+      const glm::vec3 corner(c & 1 ? m->bounds_max[0] : m->bounds_min[0], c & 2 ? m->bounds_max[1] : m->bounds_min[1],
+                             c & 4 ? m->bounds_max[2] : m->bounds_min[2]);
+      const glm::vec3 w = glm::vec3(M * glm::vec4(corner, 1));
+      blo = glm::min(blo, w);
+      bhi = glm::max(bhi, w);
+    }
+    if (glm::any(glm::lessThan(bhi, lo)) || glm::any(glm::greaterThan(blo, hi)))
+      continue;
+    for (const auto& v : BorderVertices(in.name))
+    {
+      const glm::vec3 w = glm::vec3(M * glm::vec4(v, 1));
+      if (glm::all(glm::greaterThanEqual(w, lo)) && glm::all(glm::lessThanEqual(w, hi)))
+        cells[key(w)].push_back(w);
+    }
+  }
+  if (cells.empty())
+    return false;
+  float best = r * r;
+  bool found = false;
+  for (const auto& p : from)
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz)
+        {
+          auto it = cells.find(key(p, dx, dy, dz));
+          if (it == cells.end())
+            continue;
+          for (const auto& q : it->second)
+          {
+            const glm::vec3 d = q - p;
+            const float d2 = glm::dot(d, d);
+            if (d2 < best)
+            {
+              best = d2;
+              found = true;
+              offset = d;
+              snap_line_ = {true, p, q};
+            }
+          }
+        }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// Track spline
+
+void Editor::RefreshHandles()
+{
+  TrackHandle keep = handle_ >= 0 && handle_ < int(handles_.size()) ? handles_[handle_] : TrackHandle{};
+  handles_ = course_ ? course_->TrackHandles() : std::vector<TrackHandle>{};
+  handle_ = -1;
+  for (int i = 0; i < int(handles_.size()); ++i)
+    if (handles_[i].segment == keep.segment && std::fabs(handles_[i].time - keep.time) < 1e-4f)
+      handle_ = i;
+}
+
+void Editor::SetTrackMode(bool on)
+{
+  track_mode_ = on && course_;
+  handle_ = -1;
+  armed_ = -1;
+  if (track_mode_)
+  {
+    selected_ = -1;
+    show_track_ = true;
+    Status("Track editing: click a point on the track line, move it with the gizmo. "
+           "Checkpoints, distances and the checkpoint grid follow; road models and walls do not.");
+  }
+}
+
+void Editor::ApplyCurves(int segment, const Curves& c)
+{
+  course_->SetCurves(segment, c);
+  course_->UpdateTrack();
+  RefreshHandles();
+  dirty_ = true;
+}
+
+void Editor::ResetTrack()
+{
+  UndoEntry e;
+  for (int s = 0; s < int(course_->segments().size()); ++s)
+  {
+    const auto& seg = course_->segments()[s];
+    if (seg.curves != seg.curves_orig)
+      e.curves.push_back({s, seg.curves, seg.curves_orig});
+  }
+  for (const auto& it : e.curves)
+    ApplyCurves(it.segment, it.after);
+  if (!e.curves.empty())
+  {
+    undo_.push_back(std::move(e));
+    redo_.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Structures (placing copies of object groups)
+
+void Editor::BuildStructures()
+{
+  structures_.clear();
+  const auto& list = course_->instances();
+  const bool link = link_;
+  link_ = true;  // groups are found the same way as linked objects
+  std::map<std::string, int> seen;  // signature -> structure
+  for (int i = 0; i < int(list.size()); ++i)
+  {
+    const auto& in = list[i];
+    if (in.added || in.name.empty() || IsBackground(i))
+      continue;
+    std::vector<int> members{i};
+    for (int j : Linked(i))
+      if (!list[j].added)
+        members.push_back(j);
+    // The same group seen from another member: identical sorted name list.
+    std::vector<std::string> names;
+    for (int m : members)
+      names.push_back(list[m].name);
+    std::sort(names.begin(), names.end());
+    std::string sig;
+    for (const auto& n : names)
+      sig += n + '|';
+    if (auto it = seen.find(sig); it != seen.end())
+    {
+      // Count each occurrence once (only from its lowest-index member).
+      if (*std::min_element(members.begin(), members.end()) == i)
+        ++structures_[it->second].uses;
+      continue;
+    }
+    Structure st;
+    st.members = members;
+    // Only special zones (boost etc.) come along; types 10-13 make up the bulk of
+    // all polygons (walls/borders, ~13,000 over all courses) and stay with the track.
+    for (int p : AttachedPolys(members, true))
+    {
+      const auto& sf = course_->polys()[p].surfaces;
+      if (std::none_of(sf.begin(), sf.end(), [](int t) { return t >= 10; }))
+        st.polys.push_back(p);
+    }
+    st.uses = 1;
+    const glm::vec3 pos(in.matrix[3], in.matrix[7], in.matrix[11]);
+    const bool at_origin = IsWorldPiece(i);
+    st.anchor = pos;
+    if (at_origin)
+    {
+      // World-space road pieces: anchor at the bottom centre of their bounds.
+      if (const ModelMesh* m = models_->Find(in.name); m && !m->positions.empty())
+      {
+        const glm::mat4 M = ToGlm(in.matrix);
+        const glm::vec3 a = glm::vec3(M * glm::vec4(m->bounds_min[0], m->bounds_min[1], m->bounds_min[2], 1));
+        const glm::vec3 b = glm::vec3(M * glm::vec4(m->bounds_max[0], m->bounds_max[1], m->bounds_max[2], 1));
+        const glm::vec3 lo = glm::min(a, b), hi = glm::max(a, b);
+        st.anchor = {(lo.x + hi.x) * 0.5f, lo.y, (lo.z + hi.z) * 0.5f};
+      }
+    }
+    st.category = at_origin ? 3 : !st.polys.empty() ? 0 : members.size() > 1 ? 1 : 2;
+    st.label = in.name;
+    if (members.size() > 1)
+      st.label += " + " + std::to_string(members.size() - 1);
+    seen[sig] = int(structures_.size());
+    structures_.push_back(std::move(st));
+  }
+  link_ = link;
+  std::stable_sort(structures_.begin(), structures_.end(), [](const Structure& a, const Structure& b) {
+    return a.category != b.category ? a.category < b.category : a.label < b.label;
+  });
+}
+
+std::vector<int> Editor::Spawn(const std::vector<int>& members, const std::vector<int>& polys, const glm::vec3& offset)
+{
+  UndoEntry e;
+  std::vector<int> made, made_polys;
+  for (int m : members)
+  {
+    const int n = course_->AddInstance(m);
+    auto& in = course_->instances()[n];
+    for (int k = 0; k < 3; ++k)
+    {
+      in.position[k] += offset[k];
+      in.matrix[k * 4 + 3] += offset[k];
+    }
+    original_.push_back(Get(n));
+    background_.push_back(IsBackground(m));
+    made.push_back(n);
+    e.alive.push_back({n, false, true});
+  }
+  for (int p : polys)
+  {
+    const int q = course_->AddPoly(p);
+    for (auto& v : course_->polys()[q].v)
+      for (int k = 0; k < 3; ++k)
+        v[k] += offset[k];
+    original_polys_.push_back(course_->polys()[q].v);
+    made_polys.push_back(q);
+    e.alive.push_back({q, true, true});
+  }
+  for (int n : made)
+    spawn_groups_[n] = {made, made_polys};
+  collision_dirty_ = !polys.empty() || collision_dirty_;
+  dirty_ = true;
+  undo_.push_back(std::move(e));
+  redo_.clear();
+  if (!made.empty())
+  {
+    selected_ = made.front();
+    scroll_to_selection_ = true;
+  }
+  return made;
+}
+
+void Editor::PlaceStructure(int s, const glm::vec3& offset)
+{
+  const Structure& st = structures_.at(std::size_t(s));
+  Spawn(st.members, st.polys, offset);
+  Status("Placed " + st.label + (st.polys.empty() ? "" : " with " + std::to_string(st.polys.size()) + " collision polygons") +
+         ". Ctrl+Z undoes, Del deletes it again.");
+}
+
+void Editor::DuplicateSelection()
+{
+  if (!course_ || selected_ < 0)
+    return;
+  std::vector<int> members{selected_};
+  for (int j : Linked(selected_))
+    members.push_back(j);
+  const std::vector<int> polys = AttachedPolys(members);
+  // Shift the copy sideways (camera right) by the object's width so it does not overlap.
+  float width = 20;
+  if (const ModelMesh* m = models_->Find(course_->instances()[selected_].name); m && !m->positions.empty())
+    width = std::max(width, glm::length(glm::vec3(ToGlm(course_->instances()[selected_].matrix) *
+                                                  glm::vec4(m->bounds_max[0] - m->bounds_min[0], 0,
+                                                            m->bounds_max[2] - m->bounds_min[2], 0))));
+  const glm::vec3 right = glm::normalize(glm::cross(cam_.Forward(), glm::vec3(0, 1, 0)));
+  Spawn(members, polys, right * (width * 1.1f));
+  Status("Duplicated " + std::to_string(members.size()) + " object(s)" +
+         (polys.empty() ? "" : " and " + std::to_string(polys.size()) + " collision polygons") + ".");
+}
+
+void Editor::DeleteSelection()
+{
+  if (!course_ || selected_ < 0)
+    return;
+  if (!course_->instances()[selected_].added)
+  {
+    Status("Only objects placed in this session can be deleted (original objects cannot be removed yet).", true);
+    return;
+  }
+  UndoEntry e;
+  auto it = spawn_groups_.find(selected_);
+  std::vector<int> objects = it != spawn_groups_.end() ? it->second.first : std::vector<int>{selected_};
+  const std::vector<int> polys = it != spawn_groups_.end() ? it->second.second : std::vector<int>{};
+  for (int i : objects)
+    if (Alive(i))
+      e.alive.push_back({i, false, false});
+  for (int p : polys)
+    if (!course_->polys()[p].removed)
+      e.alive.push_back({p, true, false});
+  for (const auto& a : e.alive)
+    SetAlive(a, false);
+  undo_.push_back(std::move(e));
+  redo_.clear();
+  selected_ = -1;
+  Status("Deleted " + std::to_string(objects.size()) + " placed object(s).");
+}
+
+void Editor::SetAlive(const AliveItem& item, bool alive)
+{
+  if (item.poly)
+  {
+    course_->polys()[item.index].removed = !alive;
+    collision_dirty_ = true;
+  }
+  else
+  {
+    course_->instances()[item.index].removed = !alive;
+    if (!alive && selected_ == item.index)
+      selected_ = -1;
+  }
+  dirty_ = true;
+}
 
 bool Editor::Save()
 {
@@ -486,6 +885,8 @@ void Editor::Launch()
 {
   if (dirty_ && !Save())
     return;
+  if (!ApplyCups())
+    return;
   std::string msg;
   const bool quick = project_.settings().quickstart && project_.settings().launcher == "glinux";
   const bool ok = project_.Launch(course_id_, msg);
@@ -496,10 +897,43 @@ void Editor::Launch()
          !ok);
 }
 
-void Editor::DebugStart(int course, int select, bool collision)
+void Editor::DebugStart(int course, int select, bool collision, int place, int handle, float lift)
 {
   if (course >= 0)
     OpenCourse(course);
+  if (course_ && handle >= 0 && handle < int(handles_.size()))
+  {
+    SetTrackMode(true);
+    handle_ = handle;
+    const TrackHandle h = handles_[handle];
+    const Curves before = course_->segments()[h.segment].curves;
+    course_->MoveHandle(h, before, {0, lift, 0});
+    UndoEntry e;
+    e.curves.push_back({h.segment, before, course_->segments()[h.segment].curves});
+    ApplyCurves(h.segment, e.curves.back().after);
+    undo_.push_back(std::move(e));
+    const Vec3 p = course_->HandlePosition(handles_[handle_]);
+    cam_.yaw = -90;
+    cam_.pitch = -25;
+    cam_.pos = glm::vec3(p[0], p[1], p[2]) - cam_.Forward() * 900.0f;
+    return;
+  }
+  if (course_ && place >= 0 && place < int(structures_.size()))
+  {
+    // Like a click next to the original; magnetism applies as in the 3D view.
+    glm::vec3 offset(60, 0, 0);
+    if (const char* env = std::getenv("FZGX_PLACE_OFFSET"))
+      std::sscanf(env, "%f %f %f", &offset.x, &offset.y, &offset.z);
+    if (glm::vec3 snap; MagnetActive() && SnapVertices(structures_[place].members, {}, glm::translate(glm::mat4(1), offset), snap))
+    {
+      std::printf("magnet: offset %.2f %.2f %.2f snapped by %.2f %.2f %.2f\n", offset.x, offset.y, offset.z, snap.x, snap.y, snap.z);
+      offset += snap;
+    }
+    PlaceStructure(place, offset);
+    open_structures_tab_ = true;
+    FocusSelection();
+    return;
+  }
   if (course_ && select >= 0 && select < int(course_->instances().size()))
   {
     selected_ = select;
@@ -564,7 +998,7 @@ void Editor::FocusSelection()
   cam_.pos = c - cam_.Forward() * (r * 2.5f + 20);
 }
 
-int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
+int Editor::Pick(const glm::vec3& o, const glm::vec3& d, float* t_out, bool background)
 {
   int best = -1;
   float best_t = 1e30f;
@@ -572,7 +1006,7 @@ int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
   for (int i = 0; i < int(list.size()); ++i)
   {
     const auto& in = list[i];
-    if (IsBackground(i))
+    if (in.removed || (IsBackground(i) && (!background || !show_background_)))
       continue;  // ground/sky planes would swallow every click
     const ModelMesh* mm = models_->Find(in.name);
     const bool solid = mm && !mm->positions.empty();
@@ -607,7 +1041,36 @@ int Editor::Pick(const glm::vec3& o, const glm::vec3& d)
         best_t = t, best = i;
     }
   }
+  if (t_out)
+    *t_out = best_t;
   return best;
+}
+
+bool Editor::RayHit(const glm::vec3& o, const glm::vec3& d, glm::vec3& hit)
+{
+  float best = 1e30f;
+  if (show_models_)
+  {
+    float t;
+    const int i = Pick(o, d, &t, true);
+    // Placeholder boxes are no surface to place on.
+    if (i >= 0)
+      if (const ModelMesh* m = models_->Find(course_->instances()[i].name); m && !m->positions.empty())
+        best = t;
+  }
+  const auto& tris = course_->collision().triangles;
+  for (std::size_t k = 0; k + 2 < tris.size(); k += 3)
+  {
+    float t;
+    const glm::vec3 a(tris[k][0], tris[k][1], tris[k][2]), b(tris[k + 1][0], tris[k + 1][1], tris[k + 1][2]),
+        c(tris[k + 2][0], tris[k + 2][1], tris[k + 2][2]);
+    if (RayTriangle(o, d, a, b, c, t) && t < best)
+      best = t;
+  }
+  if (best >= 1e29f)
+    return false;
+  hit = o + d * best;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -643,17 +1106,33 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
         gizmo_op_ = 2;
       if (ImGui::IsKeyPressed(ImGuiKey_F))
         FocusSelection();
+      if (ImGui::IsKeyPressed(ImGuiKey_T) && course_)
+        SetTrackMode(!track_mode_);
       if (ImGui::IsKeyPressed(ImGuiKey_Escape))
-        selected_ = -1;
+      {
+        if (armed_ >= 0)
+          armed_ = -1;
+        else if (track_mode_ && handle_ >= 0)
+          handle_ = -1;
+        else
+          selected_ = -1;
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Delete) && course_ && !track_mode_)
+        DeleteSelection();
     }
+    if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && course_ && !track_mode_)
+      DuplicateSelection();
   }
 
+  snap_line_draw_ = snap_line_;
+  snap_line_ = {};
   ImGuizmo::BeginFrame();
   DrawMenu();
   DrawCoursePanel(0, menu_h, kLeftWidth, H - menu_h - kStatusHeight);
   DrawInspector(W - kRightWidth, menu_h, kRightWidth, H - menu_h - kStatusHeight);
   DrawStatus(0, H - kStatusHeight, W);
   DrawSettings();
+  DrawCups();
   DrawPopups();
 
   HandleViewportInput(vx, vy, vw, vh, dt);
@@ -703,14 +1182,66 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
   }
   view_ = cam_.View();
 
+  const float nx = (mp.x - vx) / vw * 2 - 1, ny = 1 - (mp.y - vy) / vh * 2;
+  const glm::mat4 inv = glm::inverse(proj_ * view_);
+  const glm::vec4 a = inv * glm::vec4(nx, ny, -1, 1), b = inv * glm::vec4(nx, ny, 1, 1);
+  const glm::vec3 ray_o = glm::vec3(a) / a.w, ray_d = glm::normalize(glm::vec3(b) / b.w - ray_o);
+
+  // Placing a structure: preview under the mouse, left click places it
+  // (Shift keeps the tool for the next one), Esc / right click cancels.
+  hover_valid_ = false;
+  if (course_ && armed_ >= 0)
+  {
+    if (over && !look_active_)
+    {
+      hover_valid_ = RayHit(ray_o, ray_d, hover_);
+      if (!hover_valid_)
+      {
+        hover_ = ray_o + ray_d * 300.0f;
+        hover_valid_ = true;
+      }
+      const Structure& st = structures_[armed_];
+      place_offset_ = hover_ - st.anchor;
+      if (glm::vec3 snap; MagnetActive() && SnapVertices(st.members, {}, glm::translate(glm::mat4(1), place_offset_), snap))
+        place_offset_ += snap;
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      {
+        PlaceStructure(armed_, place_offset_);
+        if (!io.KeyShift)
+          armed_ = -1;
+      }
+    }
+    return;
+  }
+
+  // Track mode: click picks the nearest track point on screen.
+  if (track_mode_)
+  {
+    if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !(handle_ >= 0 && ImGuizmo::IsOver()))
+    {
+      const glm::mat4 vp = proj_ * view_;
+      float best = 14;  // pixels
+      int pick = -1;
+      for (int i = 0; i < int(handles_.size()); ++i)
+      {
+        const Vec3 p = course_->HandlePosition(handles_[i]);
+        const glm::vec4 c = vp * glm::vec4(p[0], p[1], p[2], 1);
+        if (c.w <= 0)
+          continue;
+        const float sx = vx + (c.x / c.w * 0.5f + 0.5f) * vw, sy = vy + (0.5f - c.y / c.w * 0.5f) * vh;
+        const float d = std::hypot(sx - mp.x, sy - mp.y);
+        if (d < best)
+          best = d, pick = i;
+      }
+      handle_ = pick;
+    }
+    return;
+  }
+
   // Click to select (unless the gizmo takes the click).
   if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsOver())
   {
-    const float nx = (mp.x - vx) / vw * 2 - 1, ny = 1 - (mp.y - vy) / vh * 2;
-    const glm::mat4 inv = glm::inverse(proj_ * view_);
-    glm::vec4 a = inv * glm::vec4(nx, ny, -1, 1), b = inv * glm::vec4(nx, ny, 1, 1);
-    const glm::vec3 o = glm::vec3(a) / a.w, e = glm::vec3(b) / b.w;
-    selected_ = Pick(o, glm::normalize(e - o));
+    selected_ = Pick(ray_o, ray_d);
     scroll_to_selection_ = true;
   }
 }
@@ -757,6 +1288,8 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     for (int i = 0; i < int(list.size()); ++i)
     {
       const auto& in = list[i];
+      if (in.removed)
+        continue;
       const glm::mat4 M = ToGlm(in.matrix);
       const GpuMesh& g = gpu_[in.name];
       const bool sel = i == selected_ || (selected_ >= 0 && std::find(linked_now.begin(), linked_now.end(), i) != linked_now.end());
@@ -788,21 +1321,76 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     if (show_track_)
     {
       const auto& cps = course_->checkpoints();
+      auto v3 = [](const Vec3& v) { return glm::vec3(v[0], v[1], v[2]); };
       for (std::size_t k = 0; k < cps.size(); ++k)
       {
         const auto& cp = cps[k];
-        const glm::vec3 a(cp.start[0], cp.start[1], cp.start[2]), b(cp.end[0], cp.end[1], cp.end[2]);
-        const glm::vec3 n(cp.start_normal[0], cp.start_normal[1], cp.start_normal[2]);
+        const glm::vec3 a = v3(cp.start), b = v3(cp.end);
+        // Centre line, track edges (width along the segment's x axis) and a cross line.
+        const glm::vec3 sa = v3(cp.side0) * (cp.width * 0.5f), sb = v3(cp.side1) * (cp.width * 0.5f);
         lines.push_back({a, Rgba(255, 220, 40)});
         lines.push_back({b, Rgba(255, 220, 40)});
-        // Width marker across the track at each checkpoint start.
-        glm::vec3 side = glm::cross(n, glm::vec3(0, 1, 0));
-        if (glm::length(side) < 1e-3f)
-          side = glm::vec3(1, 0, 0);
-        side = glm::normalize(side) * cp.width * 0.5f;
+        const std::uint32_t edge = Rgba(60, 200, 255, 200);
+        lines.push_back({a - sa, edge});
+        lines.push_back({b - sb, edge});
+        lines.push_back({a + sa, edge});
+        lines.push_back({b + sb, edge});
         const std::uint32_t col = k == 0 ? Rgba(80, 255, 120) : Rgba(255, 220, 40, 110);
-        lines.push_back({a - side, col});
-        lines.push_back({a + side, col});
+        lines.push_back({a - sa, col});
+        lines.push_back({a + sa, col});
+      }
+      if (track_mode_)
+        for (int i = 0; i < int(handles_.size()); ++i)
+        {
+          const glm::vec3 p = v3(course_->HandlePosition(handles_[i]));
+          const float r = std::max(2.0f, glm::distance(p, cam_.pos) * 0.008f);
+          AddBox(lines, glm::translate(glm::mat4(1), p), glm::vec3(-r), glm::vec3(r),
+                 i == handle_ ? Rgba(255, 255, 255) : Rgba(255, 140, 40));
+        }
+    }
+    if (snap_line_draw_.valid)
+    {
+      // Magnetism: the vertex that snapped and its target.
+      const glm::vec3 a = snap_line_draw_.from, b = snap_line_draw_.to;
+      const float r = std::max(1.5f, glm::distance(b, cam_.pos) * 0.006f);
+      lines.push_back({a, Rgba(255, 60, 255)});
+      lines.push_back({b, Rgba(255, 60, 255)});
+      AddBox(lines, glm::translate(glm::mat4(1), b), glm::vec3(-r), glm::vec3(r), Rgba(255, 60, 255));
+    }
+    if (armed_ >= 0 && hover_valid_)
+    {
+      // Preview of the structure being placed.
+      const Structure& st = structures_[armed_];
+      const glm::vec3 off = place_offset_;
+      const glm::mat4 T = glm::translate(glm::mat4(1), off);
+      for (int m : st.members)
+      {
+        const auto& in = list[m];
+        const GpuMesh& g = gpu_[in.name];
+        if (g.count)
+          renderer_.Draw(g, T * ToGlm(in.matrix), glm::vec4(1), glm::vec4(0.2f, 0.9f, 0.4f, 0.5f));
+        else
+          AddBox(lines, T * WithoutScale(ToGlm(in.matrix)), kMissingMin, kMissingMax, Rgba(80, 255, 120));
+      }
+      for (int p : st.polys)
+      {
+        const auto& v = course_->polys()[p].v;
+        for (std::size_t k = 0; k < v.size(); ++k)
+        {
+          const glm::vec3 a = glm::vec3(v[k][0], v[k][1] + 0.3f, v[k][2]) + off;
+          const glm::vec3 b = glm::vec3(v[(k + 1) % v.size()][0], v[(k + 1) % v.size()][1] + 0.3f,
+                                        v[(k + 1) % v.size()][2]) + off;
+          lines.push_back({a, Rgba(255, 235, 0)});
+          lines.push_back({b, Rgba(255, 235, 0)});
+        }
+      }
+      // Cross marking the spot.
+      for (int k = 0; k < 3; ++k)
+      {
+        glm::vec3 e(0);
+        e[k] = 15;
+        lines.push_back({hover_ - e, Rgba(80, 255, 120)});
+        lines.push_back({hover_ + e, Rgba(80, 255, 120)});
       }
     }
     if (selected_ >= 0)
@@ -831,8 +1419,67 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
   renderer_.DrawLines(lines, false);
   glViewport(0, 0, fb_w, fb_h);
 
+  // Track point gizmo: moves the selected key of the position curves.
+  if (course_ && track_mode_ && handle_ >= 0 && handle_ < int(handles_.size()))
+  {
+    ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
+    ImGuizmo::SetRect(vx, vy, vw, vh);
+    const TrackHandle h = handles_[handle_];
+    const Vec3 p = course_->HandlePosition(h);
+    glm::mat4 M = glm::translate(glm::mat4(1), glm::vec3(p[0], p[1], p[2]));
+    float snap[3] = {snap_move_, snap_move_, snap_move_};
+    const bool changed = ImGuizmo::Manipulate(glm::value_ptr(view_), glm::value_ptr(proj_), ImGuizmo::TRANSLATE,
+                                              ImGuizmo::WORLD, glm::value_ptr(M), nullptr, snap_ ? snap : nullptr);
+    const bool using_now = ImGuizmo::IsUsing();
+    if (using_now && !gizmo_was_using_)
+    {
+      handle_base_ = course_->segments()[h.segment].curves;
+      handle_start_ = p;
+    }
+    if (changed && using_now)
+    {
+      Vec3 delta = {M[3][0] - handle_start_[0], M[3][1] - handle_start_[1], M[3][2] - handle_start_[2]};
+      if (MagnetActive())
+      {
+        // Snap onto another track point (e.g. to join two segments).
+        const glm::vec3 target(M[3]);
+        float best = project_.settings().magnet_radius;
+        for (int i = 0; i < int(handles_.size()); ++i)
+        {
+          if (i == handle_)
+            continue;
+          const Vec3 q = course_->HandlePosition(handles_[i]);
+          const float d = glm::distance(target, glm::vec3(q[0], q[1], q[2]));
+          if (d < best)
+          {
+            best = d;
+            delta = {q[0] - handle_start_[0], q[1] - handle_start_[1], q[2] - handle_start_[2]};
+            snap_line_ = {true, target, glm::vec3(q[0], q[1], q[2])};
+          }
+        }
+      }
+      course_->MoveHandle(h, handle_base_, delta);
+      course_->UpdateTrack();
+      dirty_ = true;
+    }
+    if (!using_now && gizmo_was_using_)
+    {
+      const Curves& now = course_->segments()[h.segment].curves;
+      if (now != handle_base_)
+      {
+        UndoEntry e;
+        e.curves.push_back({h.segment, handle_base_, now});
+        undo_.push_back(std::move(e));
+        redo_.clear();
+      }
+      RefreshHandles();
+    }
+    gizmo_was_using_ = using_now;
+    return;
+  }
+
   // Gizmo (drawn by ImGui on the background draw list, inside the viewport rect).
-  if (course_ && selected_ >= 0)
+  if (course_ && selected_ >= 0 && !track_mode_)
   {
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(vx, vy, vw, vh);
@@ -859,6 +1506,19 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         t.rotation = {DegToAngle(rot[0]), DegToAngle(rot[1]), DegToAngle(rot[2])};
         t.scale = scl;
         t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+        if (gizmo_op_ == 0 && MagnetActive())
+        {
+          // Snap a vertex of the moved object onto a vertex of another one.
+          std::vector<int> exclude = Linked(selected_);
+          exclude.push_back(selected_);
+          const glm::mat4 pre = ToGlm(t.matrix) * glm::inverse(ToGlm(course_->instances()[selected_].matrix));
+          if (glm::vec3 snap; SnapVertices({selected_}, exclude, pre, snap))
+          {
+            for (int k = 0; k < 3; ++k)
+              t.position[k] += snap[k];
+            t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+          }
+        }
         ApplyPrimary(t);
       }
     }
@@ -894,6 +1554,8 @@ void Editor::DrawMenu()
     }
     if (ImGui::MenuItem("Settings…"))
       show_settings_ = true;
+    if (ImGui::MenuItem("Cups…"))
+      show_cups_ = true;
     ImGui::Separator();
     if (ImGui::MenuItem("Quit"))
       RequestQuit();
@@ -905,6 +1567,16 @@ void Editor::DrawMenu()
       Undo();
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redo_.empty()))
       Redo();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Edit track spline", "T", track_mode_, course_.has_value()))
+      SetTrackMode(!track_mode_);
+    if (ImGui::MenuItem("Reset track spline", nullptr, false, course_ && course_->track_modified()))
+      ResetTrack();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Duplicate selection", "Ctrl+D", false, selected_ >= 0))
+      DuplicateSelection();
+    if (ImGui::MenuItem("Delete placed object", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
+      DeleteSelection();
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("View"))
@@ -933,6 +1605,12 @@ void Editor::DrawMenu()
         "           mouse wheel = forward/back, middle mouse button = pan\n"
         "Selection: left click in the 3D view or in the object list\n"
         "Gizmo:     W move, E rotate, R scale, F focus\n"
+        "Track:     T toggles track editing: click a point on the track line,\n"
+        "           move it with the gizmo (checkpoints follow, road models do not)\n"
+        "Magnetism: moved objects snap onto nearby vertices, track points onto\n"
+        "           other track points (Tool panel), hold Alt to move freely\n"
+        "Place:     Structures tab, pick an entry, click in the 3D view\n"
+        "           (Shift+click places several), Ctrl+D duplicate, Del delete\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
         "Note: road models are visuals only. The driving surface and physics come\n"
         "from the track spline (yellow line), which cannot be edited yet.\n\n"
@@ -957,8 +1635,9 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
   {
     for (const auto& c : courses_)
     {
-      char label[64];
-      std::snprintf(label, sizeof label, "%s Course %02d", c.modified ? "*" : " ", c.id);
+      char label[96];
+      std::snprintf(label, sizeof label, "%s %02d  %s##course%d", c.modified ? "*" : " ", c.id,
+                    *CourseName(c.id) ? CourseName(c.id) : "(special)", c.id);
       if (ImGui::Selectable(label, c.id == course_id_) && c.id != course_id_)
       {
         if (dirty_)
@@ -966,28 +1645,64 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
         else
           OpenCourse(c.id);
       }
+      std::string cups;
+      for (const auto& name : CupsOfCourse(c.id, cups_))
+        cups += (cups.empty() ? "" : ", ") + name;
+      if (!cups.empty())
+      {
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
+        ImGui::TextDisabled("%s", cups.c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("%s", cups.c_str());
+      }
     }
     ImGui::EndListBox();
   }
   ImGui::TextDisabled("* = changed in the mod folder");
 
-  ImGui::SeparatorText("Objects");
   if (!course_)
   {
+    ImGui::SeparatorText("Objects");
     ImGui::TextDisabled("No course loaded.");
     ImGui::End();
     return;
   }
+  if (ImGui::BeginTabBar("##lefttabs"))
+  {
+    if (ImGui::BeginTabItem("Objects"))
+    {
+      DrawObjectList();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Structures", nullptr, open_structures_tab_ ? ImGuiTabItemFlags_SetSelected : 0))
+    {
+      DrawStructurePanel();
+      ImGui::EndTabItem();
+    }
+    open_structures_tab_ = false;
+    ImGui::EndTabBar();
+  }
+  ImGui::End();
+}
+
+void Editor::DrawObjectList()
+{
   ImGui::SetNextItemWidth(-1);
   ImGui::InputTextWithHint("##filter", "Filter (name)…", &filter_);
   std::string needle = filter_;
   std::transform(needle.begin(), needle.end(), needle.begin(), ::toupper);
   std::vector<int> rows;
   const auto& list = course_->instances();
+  int alive = 0;
   for (int i = 0; i < int(list.size()); ++i)
+  {
+    if (list[i].removed)
+      continue;
+    ++alive;
     if (needle.empty() || list[i].name.find(needle) != std::string::npos)
       rows.push_back(i);
-  ImGui::TextDisabled("%zu of %zu", rows.size(), list.size());
+  }
+  ImGui::TextDisabled("%zu of %d", rows.size(), alive);
   ImGui::BeginChild("##objects", {-1, -1}, ImGuiChildFlags_Borders);
   ImGuiListClipper clip;
   clip.Begin(int(rows.size()));
@@ -1005,7 +1720,7 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
       const GpuMesh& g = gpu_[in.name];
       char label[160];
       std::snprintf(label, sizeof label, "%4d  %s%s", i, in.name.empty() ? "(unnamed)" : in.name.c_str(),
-                    Modified(i) ? "  *" : "");
+                    in.added ? "  +" : Modified(i) ? "  *" : "");
       if (!g.count)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1));
       if (ImGui::Selectable(label, i == selected_))
@@ -1022,7 +1737,74 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
     }
   ImGui::EndChild();
   scroll_to_selection_ = false;
-  ImGui::End();
+}
+
+void Editor::DrawStructurePanel()
+{
+  if (armed_ >= 0)
+  {
+    ImGui::TextColored({0.4f, 1, 0.55f, 1}, "Placing: %s", structures_[armed_].label.c_str());
+    ImGui::TextDisabled("Click in the 3D view. Shift+click\nplaces several, Esc cancels.");
+    if (ImGui::Button("Cancel", {-1, 0}))
+      armed_ = -1;
+  }
+  else
+    ImGui::TextDisabled("Pick a structure, then click in the\n3D view to place a copy there.");
+  ImGui::SetNextItemWidth(-1);
+  ImGui::InputTextWithHint("##sfilter", "Filter (name)…", &structure_filter_);
+  std::string needle = structure_filter_;
+  std::transform(needle.begin(), needle.end(), needle.begin(), ::toupper);
+  ImGui::BeginChild("##structures", {-1, -1}, ImGuiChildFlags_Borders);
+  const auto& list = course_->instances();
+  for (int c = 0; c < int(std::size(kStructureCategories)); ++c)
+  {
+    std::vector<int> rows;
+    for (int k = 0; k < int(structures_.size()); ++k)
+      if (structures_[k].category == c && (needle.empty() || structures_[k].label.find(needle) != std::string::npos))
+        rows.push_back(k);
+    if (rows.empty())
+      continue;
+    char header[96];
+    std::snprintf(header, sizeof header, "%s (%zu)###cat%d", kStructureCategories[c], rows.size(), c);
+    if (!ImGui::CollapsingHeader(header, c == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0))
+      continue;
+    for (int k : rows)
+    {
+      const Structure& st = structures_[k];
+      ImGui::PushID(k);
+      if (ImGui::Selectable(st.label.c_str(), armed_ == k))
+      {
+        armed_ = armed_ == k ? -1 : k;
+        selected_ = -1;
+      }
+      if (st.uses > 1)
+      {
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
+        ImGui::TextDisabled("x%d", st.uses);
+      }
+      if (ImGui::BeginItemTooltip())
+      {
+        for (int m : st.members)
+          ImGui::Text("#%d  %s", m, list[m].name.c_str());
+        if (!st.polys.empty())
+        {
+          int boost = 0;
+          for (int p : st.polys)
+          {
+            const auto& sf = course_->polys()[p].surfaces;
+            boost += std::find(sf.begin(), sf.end(), 3) != sf.end();
+          }
+          ImGui::TextColored({1, 0.85f, 0.3f, 1}, "%zu collision polygons (%d boost)", st.polys.size(), boost);
+        }
+        if (st.category == 3)
+          ImGui::TextColored({1, 0.6f, 0.4f, 1}, "Road models are visuals only: they do not\nchange where the track can be driven.");
+        ImGui::TextDisabled("Occurs %d time(s) in this course.", st.uses);
+        ImGui::EndTooltip();
+      }
+      ImGui::PopID();
+    }
+  }
+  ImGui::EndChild();
 }
 
 void Editor::DrawInspector(float x, float y, float w, float h)
@@ -1037,10 +1819,73 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   ImGui::RadioButton("Scale (R)", &gizmo_op_, 2);
   ImGui::Checkbox("Local axes", &gizmo_local_);
   ImGui::Checkbox("Snap", &snap_);
+  {
+    Settings& st = project_.settings();
+    if (ImGui::Checkbox("Magnetism", &st.magnet))
+      st.Save();
+    ImGui::SetItemTooltip("Moved objects and track points snap onto nearby vertices / track points.\n"
+                          "Hold Alt to move freely.");
+    if (st.magnet)
+    {
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(80);
+      if (ImGui::DragFloat("Range", &st.magnet_radius, 0.5f, 1, 1000, "%.0f"))
+        st.magnet_radius = std::clamp(st.magnet_radius, 1.0f, 1000.0f);
+      if (ImGui::IsItemDeactivatedAfterEdit())
+        st.Save();
+      if (ImGui::GetIO().KeyAlt)
+        ImGui::TextColored({1, 0.6f, 1, 1}, "Alt held: magnetism off");
+    }
+  }
   if (snap_)
   {
     ImGui::SetNextItemWidth(100);
     ImGui::DragFloat("Step", gizmo_op_ == 0 ? &snap_move_ : gizmo_op_ == 1 ? &snap_rot_ : &snap_scale_, 0.1f, 0.01f, 1000);
+  }
+
+  if (course_ && ImGui::Checkbox("Edit track spline (T)", &track_mode_))
+    SetTrackMode(track_mode_);
+  if (course_ && track_mode_)
+  {
+    ImGui::SeparatorText("Track point");
+    if (handle_ >= 0 && handle_ < int(handles_.size()))
+    {
+      const TrackHandle& h = handles_[handle_];
+      const auto& seg = course_->segments()[h.segment];
+      const Vec3 p = course_->HandlePosition(h);
+      ImGui::Text("Segment #%d (0x%05X)  t = %.3f", h.segment, seg.offset, h.time);
+      ImGui::Text("Position %.1f  %.1f  %.1f", p[0], p[1], p[2]);
+      ImGui::TextDisabled("Keys: x %zu  y %zu  z %zu", seg.curves[6].size(), seg.curves[7].size(), seg.curves[8].size());
+      if (seg.curves != seg.curves_orig && ImGui::Button("Reset this segment"))
+      {
+        UndoEntry e;
+        e.curves.push_back({h.segment, seg.curves, seg.curves_orig});
+        ApplyCurves(e.curves.back().segment, e.curves.back().after);
+        undo_.push_back(std::move(e));
+        redo_.clear();
+      }
+    }
+    else
+      ImGui::TextDisabled("Click an orange point on the track\nline in the 3D view.");
+    ImGui::SeparatorText("Track");
+    ImGui::Text("Length %.1f%s", course_->track_length(), course_->track_modified() ? " (changed)" : "");
+    ImGui::TextDisabled("%zu segments, %zu checkpoints,\n%zu points", course_->segments().size(),
+                        course_->checkpoints().size(), handles_.size());
+    ImGui::BeginDisabled(!course_->track_modified());
+    if (ImGui::Button("Reset whole track", {-1, 0}))
+      ResetTrack();
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::TextColored({1, 0.8f, 0.3f, 1}, "Moves the drivable path and checkpoints.\n"
+                                           "Road models and static collision (walls)\n"
+                                           "stay where they are.");
+    ImGui::SeparatorText("Course");
+    if (ImGui::Button("Save", {-1, 0}))
+      Save();
+    if (ImGui::Button("Test in game (F5)", {-1, 0}))
+      Launch();
+    ImGui::End();
+    return;
   }
 
   ImGui::SeparatorText("Object");
@@ -1052,7 +1897,10 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
   auto& in = course_->instances()[selected_];
   ImGui::Text("#%d  %s", selected_, in.name.c_str());
-  ImGui::TextDisabled("Offset 0x%05X  Flags 0x%08X", in.offset, in.flags);
+  if (in.added)
+    ImGui::TextColored({0.4f, 1, 0.55f, 1}, "Placed in the editor (Del deletes it)");
+  else
+    ImGui::TextDisabled("Offset 0x%05X  Flags 0x%08X", in.offset, in.flags);
   const ModelMesh* m = models_->Find(in.name);
   if (!m)
     ImGui::TextColored({1, 0.5f, 0.4f, 1}, "Model not found (placeholder)");
@@ -1060,7 +1908,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
     ImGui::TextColored({0.5f, 0.8f, 1, 1}, "Animated/skinned model (box only)");
   else
     ImGui::TextDisabled("%zu triangles", m->positions.size() / 3);
-  if (!in.matrix_offset)
+  if (!in.HasMatrix())
     ImGui::TextColored({1, 0.8f, 0.3f, 1}, "No matrix: the game uses its own logic,\nchanges may have no effect.");
 
   Transform t = Get(selected_);
@@ -1150,6 +1998,15 @@ void Editor::DrawInspector(float x, float y, float w, float h)
   }
 
   ImGui::Spacing();
+  if (ImGui::Button("Duplicate (Ctrl+D)"))
+    DuplicateSelection();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!in.added);
+  if (ImGui::Button("Delete (Del)"))
+    DeleteSelection();
+  ImGui::EndDisabled();
+  if (!in.added)
+    ImGui::SetItemTooltip("Only objects placed in this session can be deleted.");
   if (ImGui::Button("Bring in front of camera"))
   {
     // Moves the object 300 units in front of the camera.
@@ -1178,11 +2035,17 @@ void Editor::DrawInspector(float x, float y, float w, float h)
 
   ImGui::SeparatorText("Course");
   ImGui::Text("Course %02d  %s", course_id_, venue_.c_str());
-  ImGui::TextDisabled("%zu objects, %zu checkpoints", course_->instances().size(), course_->checkpoints().size());
-  int changed_count = 0;
+  ImGui::TextDisabled("%zu objects, %zu checkpoints", std::size_t(std::count_if(course_->instances().begin(), course_->instances().end(), [](const SceneInstance& o) { return !o.removed; })), course_->checkpoints().size());
+  int changed_count = 0, added_count = 0;
   for (int i = 0; i < int(course_->instances().size()); ++i)
-    changed_count += Modified(i);
-  ImGui::Text("Changed objects: %d", changed_count);
+  {
+    const auto& o = course_->instances()[i];
+    if (o.added)
+      added_count += !o.removed;
+    else
+      changed_count += Modified(i);
+  }
+  ImGui::Text("Changed objects: %d, placed: %d", changed_count, added_count);
   if (ImGui::Button("Save", {-1, 0}))
     Save();
   if (ImGui::Button("Test in game (F5)", {-1, 0}))
@@ -1258,6 +2121,187 @@ void Editor::DrawSettings()
     s.Save();
     Status("Settings saved: " + s.file().string());
   }
+  ImGui::End();
+}
+
+bool Editor::ApplyCups()
+{
+  std::string msg;
+  const bool ok = project_.ApplyCups(cups_, msg);
+  if (!ok)
+    Status(msg, true);
+  return ok;
+}
+
+unsigned Editor::CupIconTexture(int cup)
+{
+  if (!selgf_)
+    selgf_ = project_.LoadDiscTpl("bmp_selgf");
+  if (!selgf_)
+    return 0;
+  cup_icons_.resize(cups_.size(), 0);
+  cup_icon_hue_.resize(cups_.size(), -1);
+  if (cup_icons_[cup] == 0 || cup_icon_hue_[cup] != cups_[cup].hue)
+  {
+    renderer_.FreeTexture(cup_icons_[cup]);
+    try
+    {
+      cup_icons_[cup] = renderer_.CreateTexture(CupIcon(*selgf_, cups_[cup].hue), 0);
+    }
+    catch (const FormatError&)
+    {
+      cup_icons_[cup] = 0;
+    }
+    cup_icon_hue_[cup] = cups_[cup].hue;
+  }
+  return cup_icons_[cup];
+}
+
+void Editor::DrawCups()
+{
+  if (!show_cups_)
+    return;
+  ImGui::SetNextWindowSize({640, 560}, ImGuiCond_Appearing);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+  if (!ImGui::Begin("Cups", &show_cups_))
+  {
+    ImGui::End();
+    return;
+  }
+  auto course_label = [](int id) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%02d  %s", id, CourseName(id));
+    return std::string(buf);
+  };
+
+  ImGui::SeparatorText("Game cups");
+  if (ImGui::BeginTable("##orig", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+  {
+    for (const auto& c : OriginalCups())
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(c.name);
+      ImGui::TableNextColumn();
+      std::string list;
+      for (const int id : c.courses)
+        list += (list.empty() ? "" : ", ") + std::string(CourseName(id));
+      ImGui::TextDisabled("%s", list.c_str());
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::SeparatorText("Custom cups");
+  ImGui::TextWrapped("Custom cups appear in every cup selection (Grand Prix, Time Attack, Practice, VS) "
+                     "behind the AX Cup: an arrow leads to a second page with these cups. Up to %d cups with up to %d courses each.",
+                     kMaxCustomCups, kMaxCupCourses);
+  std::vector<int> race_courses;
+  for (const auto& c : courses_)
+    if (*CourseName(c.id))
+      race_courses.push_back(c.id);
+
+  int remove_cup = -1;
+  for (int i = 0; i < int(cups_.size()); ++i)
+  {
+    CupDef& cup = cups_[i];
+    ImGui::PushID(i);
+    ImGui::Separator();
+    if (const unsigned tex = CupIconTexture(i))
+    {
+      ImGui::Image(ImTextureID(std::intptr_t(tex)), {46, 58});
+      ImGui::SameLine();
+    }
+    ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::InputText("Name", &cup.name))
+      cups_dirty_ = true;
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::SliderFloat("Gem colour", &cup.hue, 0, 359, "%.0f°"))
+      cups_dirty_ = true;
+    ImGui::EndGroup();
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90);
+    if (ImGui::Button("Remove cup"))
+      remove_cup = i;
+
+    int remove_course = -1;
+    for (int k = 0; k < int(cup.courses.size()); ++k)
+    {
+      ImGui::PushID(k);
+      ImGui::Text("Race %d", k + 1);
+      ImGui::SameLine(70);
+      ImGui::SetNextItemWidth(260);
+      if (ImGui::BeginCombo("##course", course_label(cup.courses[k]).c_str()))
+      {
+        for (const int id : race_courses)
+          if (ImGui::Selectable(course_label(id).c_str(), id == cup.courses[k]))
+          {
+            cup.courses[k] = id;
+            cups_dirty_ = true;
+          }
+        ImGui::EndCombo();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Remove"))
+        remove_course = k;
+      ImGui::PopID();
+    }
+    if (remove_course >= 0)
+    {
+      cup.courses.erase(cup.courses.begin() + remove_course);
+      cups_dirty_ = true;
+    }
+    ImGui::BeginDisabled(int(cup.courses.size()) >= kMaxCupCourses || race_courses.empty());
+    if (ImGui::Button("Add course"))
+    {
+      cup.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+      cups_dirty_ = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::PopID();
+  }
+  if (remove_cup >= 0)
+  {
+    cups_.erase(cups_.begin() + remove_cup);
+    if (remove_cup < int(cup_icons_.size()))
+    {
+      renderer_.FreeTexture(cup_icons_[remove_cup]);
+      cup_icons_.erase(cup_icons_.begin() + remove_cup);
+      cup_icon_hue_.erase(cup_icon_hue_.begin() + remove_cup);
+    }
+    cups_dirty_ = true;
+  }
+  ImGui::Separator();
+  ImGui::BeginDisabled(int(cups_.size()) >= kMaxCustomCups || race_courses.empty());
+  if (ImGui::Button("Add custom cup"))
+  {
+    CupDef c;
+    c.name = "Custom Cup " + std::to_string(cups_.size() + 1);
+    c.hue = cups_.empty() ? 30.0f : 200.0f;
+    c.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+    cups_.push_back(c);
+    cups_dirty_ = true;
+  }
+  ImGui::EndDisabled();
+
+  const std::string problem = ValidateCups(cups_);
+  if (!problem.empty())
+    ImGui::TextColored({1, 0.4f, 0.4f, 1}, "%s", problem.c_str());
+  ImGui::BeginDisabled(!problem.empty());
+  if (ImGui::Button(cups_dirty_ ? "Save cups and write mod folder *" : "Save cups and write mod folder"))
+  {
+    std::string msg;
+    if (!SaveCups(project_.settings().cups_file(), cups_))
+      Status("Could not write " + project_.settings().cups_file().string(), true);
+    else if (project_.ApplyCups(cups_, msg))
+    {
+      cups_dirty_ = false;
+      Status(msg + " Start the game normally (not the direct start) to choose the cup.");
+    }
+    else
+      Status(msg, true);
+  }
+  ImGui::EndDisabled();
+  ImGui::TextDisabled("Written: sys/main.dol (patched) and files/bmp_e/bmp_selgf.tpl.lz (icons) in the mod folder.");
   ImGui::End();
 }
 

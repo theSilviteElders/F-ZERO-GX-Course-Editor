@@ -100,15 +100,146 @@ static int SelfTest(const fs::path& workspace)
         }
       }
     }
-    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f;
+    // Add a copied object and a copied collision polygon, save, re-parse.
+    bool add_ok = true;
+    if (!course.instances().empty())
+    {
+      Course c = course;
+      const int src = int(c.instances().size()) / 2;
+      const int a = c.AddInstance(src);
+      auto& in = c.instances()[a];
+      in.position = {in.position[0] + 50, in.position[1] + 5, in.position[2] - 30};
+      in.matrix = ComposeMatrix(in.position, in.rotation, in.scale);
+      const int gone = c.AddInstance(src);
+      c.instances()[gone].removed = true;
+      int pa = -1;
+      // First polygon that still lies inside the collision grid after the shift.
+      for (int k = 0; k < int(c.polys().size()) && pa < 0; ++k)
+      {
+        StaticPoly shifted = c.polys()[k];
+        for (auto& v : shifted.v)
+          v[0] += 20;
+        bool outside = false;
+        if (CellsCovered(c.grid(), shifted, &outside).empty() || outside || shifted.surfaces.empty())
+          continue;
+        pa = c.AddPoly(k);
+        c.polys()[pa].v = shifted.v;
+      }
+      const Course re = Course::Parse(c.Serialize());
+      add_ok = re.instances().size() == course.instances().size() + 1;
+      if (add_ok)
+      {
+        const auto& r = re.instances().back();
+        add_ok = r.name == in.name && r.position == in.position && r.rotation == in.rotation &&
+                 r.HasMatrix() == in.HasMatrix() && (!r.matrix_offset || r.matrix == in.matrix) &&
+                 r.flags == course.instances()[src].flags;
+        for (std::size_t k = 0; k < course.instances().size() && add_ok; ++k)
+          add_ok = re.instances()[k].position == course.instances()[k].position &&
+                   re.instances()[k].name == course.instances()[k].name;
+      }
+      if (add_ok && pa >= 0)
+      {
+        const auto& want = c.polys()[pa];
+        bool found = false;
+        for (const auto& p : re.polys())
+          found |= p.quad == want.quad && p.v == want.v && p.surfaces == want.surfaces;
+        add_ok = found && re.polys().size() == course.polys().size() + 1;
+      }
+    }
+    // Track spline: anchors, checkpoint grid rule, editing round trip.
+    float anchor_err = 0;
+    for (const auto& cp : course.checkpoints())
+      anchor_err = std::max(anchor_err, cp.anchor_error);
+    int grid_missing = 0, grid_extra = 0;
+    {
+      const std::uint32_t table = U32(data, 0xBC);
+      const int nx = int(U32(data, 0xD0)), nz = int(U32(data, 0xD4));
+      const CheckpointGrid g = BuildCheckpointGrid(course, nx, nz);
+      for (int cell = 0; table && cell < nx * nz; ++cell)
+      {
+        std::vector<std::uint16_t> orig;
+        for (std::uint32_t l = U32(data, table + 4 * cell); l && U16(data, l) != 0xFFFF; l += 2)
+          orig.push_back(U16(data, l));
+        const auto& mine = g.cells.at(std::size_t(cell));
+        for (auto n : orig)
+          grid_missing += std::find(mine.begin(), mine.end(), n) == mine.end();
+        grid_extra += int(mine.size()) - int(orig.size());
+      }
+    }
+    bool track_ok = true;
+    {
+      Course c = course;
+      const auto handles = c.TrackHandles();
+      if (!handles.empty())
+      {
+        const TrackHandle h = handles[handles.size() / 2];
+        const Vec3 before = c.HandlePosition(h);
+        c.MoveHandle(h, c.segments()[h.segment].curves, {0, 40, 25});
+        c.UpdateTrack();
+        const Vec3 after = c.HandlePosition(h);
+        track_ok = c.track_modified() && std::fabs(after[1] - before[1] - 40) < 0.05f && std::fabs(after[2] - before[2] - 25) < 0.05f;
+        const Course re = Course::Parse(c.Serialize());
+        track_ok &= re.instances().size() == c.instances().size() && re.segments().size() == c.segments().size() &&
+                    re.checkpoints().size() == c.checkpoints().size() && std::fabs(re.track_length() - c.track_length()) < 1e-3f;
+        for (std::size_t k = 0; track_ok && k < re.segments().size(); ++k)
+          track_ok = re.segments()[k].curves == c.segments()[k].curves;
+        for (std::size_t k = 0; track_ok && k < re.checkpoints().size(); ++k)
+        {
+          const auto& a = re.checkpoints()[k];
+          const auto& b = c.checkpoints()[k];
+          track_ok = a.start == b.start && a.end == b.end && a.dist0 == b.dist0 && a.dist1 == b.dist1;
+        }
+        if (!track_ok)
+          std::printf("  track edit failed: handle seg %d t=%.3f\n", h.segment, h.time);
+      }
+    }
+    const bool ok = header_ok && roundtrip && lz_ok && poly_err < 2e-3f && add_ok && grid_missing == 0 && track_ok;
     failures += !ok;
-    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e lz %6zu->%6zu %lldms\n",
+    std::printf("%s %-20s %-14s inst=%3zu mtx=%3d anim=%3d shared=%d err=%.1e models=%3d/%3zu skinned=%d empty=%d tris=%7zu cps=%4zu coll=%5zu polyerr=%.1e add=%s track: segs=%zu anchor=%.1f grid-%d/+%d edit=%s lz %6zu->%6zu %lldms\n",
                 ok ? "OK  " : "FAIL", Project::CourseFile(info.id).c_str(), venue.c_str(),
                 course.instances().size(), with_matrix, animated, shared, max_err, found,
                 course.instances().size(), skinned, empty, tris, course.checkpoints().size(),
-                course.collision().triangles.size() / 3, poly_err, raw.size(), packed.size(), (long long)ms);
+                course.collision().triangles.size() / 3, poly_err, add_ok ? "ok" : "FAIL", course.segments().size(), anchor_err, grid_missing, grid_extra, track_ok ? "ok" : "FAIL", raw.size(), packed.size(), (long long)ms);
   }
   std::printf("lz total: original %zu, ours %zu bytes\n", total_in, total_out);
+
+  // Custom cups: main.dol patch and icon textures (nothing is written).
+  {
+    bool ok = false;
+    std::string what;
+    try
+    {
+      const auto dol = ReadFile(s.disc() / "sys" / "main.dol");
+      const Bytes selgf_raw = LzDecompress(*ReadFile(s.disc() / "files" / "bmp_e" / "bmp_selgf.tpl.lz"));
+      const TplFile selgf(selgf_raw);
+      const auto sel = project.LoadDiscTpl("bmp_sel");
+      const std::vector<CupDef> cups = {{"Self Test", {7, 13, 21, 25, 27}, 200}, {"Two", {1}, 60}};
+      const Bytes patched = PatchDol(*dol, cups, selgf.count());
+      const Texture icon = CupIcon(selgf, 200), arrow = LeftArrow(*sel);
+      const TplFile out(AppendTextures(selgf_raw, {arrow, icon}));
+      bool same = out.count() == selgf.count() + 2;
+      for (int i = 0; same && i < selgf.count(); ++i)
+      {
+        const auto a = selgf.Decode(i), b = out.Decode(i);
+        same = a.has_value() == b.has_value() && (!a || a->rgba == b->rgba);
+      }
+      const auto back = out.Decode(selgf.count() + 1);
+      // RGB5A3 keeps 5 bits per channel for opaque pixels.
+      bool icon_ok = back && back->width == icon.width && back->height == icon.height;
+      for (std::size_t i = 0; icon_ok && i < icon.rgba.size(); ++i)
+        icon_ok = std::abs(int(back->rgba[i]) - int(icon.rgba[i])) <= 36;
+      ok = patched.size() > dol->size() && same && icon_ok;
+      what = "dol " + std::to_string(dol->size()) + "->" + std::to_string(patched.size()) +
+             " textures " + std::to_string(selgf.count()) + "->" + std::to_string(out.count()) +
+             (same ? "" : " ORIGINAL-TEXTURES-CHANGED") + (icon_ok ? "" : " ICON-MISMATCH");
+    }
+    catch (const std::exception& e)
+    {
+      what = e.what();
+    }
+    std::printf("%s cups: %s\n", ok ? "OK  " : "FAIL", what.c_str());
+    failures += !ok;
+  }
   return failures ? 1 : 0;
 }
 
@@ -235,7 +366,17 @@ int main(int argc, char** argv)
         return 1;
       return WriteFileAtomic(argv[3], cmd == "lz" ? LzCompress(*in) : LzDecompress(*in)) ? 0 : 1;
     }
-    std::cerr << "usage: fzgx-cli selftest <workspace> | unlz <in> <out> | lz <in> <out>\n";
+    if (cmd == "cups" && argc == 3)
+    {
+      Settings st;
+      st.workspace = argv[2];
+      Project pr(st);
+      std::string msg;
+      const bool ok = pr.ApplyCups(LoadCups(st.cups_file()), msg);
+      std::cout << msg << "\n";
+      return ok ? 0 : 1;
+    }
+    std::cerr << "usage: fzgx-cli selftest <workspace> | cups <workspace> | unlz <in> <out> | lz <in> <out>\n";
     return 2;
   }
   catch (const std::exception& e)

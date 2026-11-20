@@ -48,6 +48,55 @@ warning "polygon extends outside the collision grid" appears, that part
 probably has no effect. On Twist Road this affects dash plate #0, which lies at
 the edge of the grid.
 
+## 2b. Place a new structure
+
+1. Switch the left panel from **Objects** to **Structures**.
+2. Under *Boost & special zones* click `DASH01_BOARD + 3` (the dash plate set:
+   plate, arrow marker, two rings and its boost polygons). A green preview
+   follows the mouse in the 3D view.
+3. Click on the road where the new dash plate should go. Shift+click places
+   several, Esc cancels.
+4. The copy is selected: move/rotate it with the gizmo like any other object.
+   `Del` deletes it again, Ctrl+Z undoes the placing.
+
+Alternatively select an existing object and press **Ctrl+D** (duplicate,
+including linked objects and boost zone; the copy appears to the side).
+
+New objects are appended to the course file (the object table and the
+collision polygon arrays are copied to the end with the new entries). The
+format check in `fzgx-cli selftest` passes for all courses, but whether the
+game accepts it is not tested yet. That is the main question here.
+
+## 2c. Move the track spline
+
+1. Press **T** (or tick *Edit track spline* on the right). Orange points
+   appear on the track line, the cyan lines are the track edges.
+2. Click a point on a straight and drag the green (up) arrow of the gizmo
+   about 100 units up. The track line forms a hill, the road model stays.
+3. Ctrl+Z undoes it, *Reset whole track* restores the original spline.
+
+In the game: does the vehicle drive over the invisible hill (follows the
+spline), or along the road model? Does the course load, do lap counting and
+the position display still work?
+
+## 2d. Create a custom cup
+
+1. *File → Cups…*, then *Add custom cup*. Give it a name, pick a gem colour
+   and choose up to five courses (*Add course* adds the open course).
+2. *Save cups and write mod folder*.
+3. Switch the direct start off (*File → Settings*) and press **F5**. In the
+   game go to Grand Prix, pick a class, and in the cup selection move right
+   past the AX Cup (or past the last unlocked cup): an arrow leads to a second
+   page with your cups.
+4. Pick your cup: the cup intro and the course screen should show your cup's
+   icon, name and courses, and the first race should be your first course.
+
+The custom cups are also on the second page in Time Attack, Practice and VS
+Battle. Most interesting to report: does a whole Grand Prix in the custom cup
+work to the end (next races, results screen, ranking), and does VS Battle
+work? Removing all custom cups and
+saving restores the original files.
+
 ## 3. Save and start the game
 
 - **F5** saves the course and starts GLINUX **directly in a race** on the open
@@ -68,6 +117,9 @@ the edge of the grid.
 | Visuals | Dash plate, marker and ring are larger or at the new spot |
 | Boost | Does the boost work on the **whole** new area or at the new spot? |
 | Rest of the course | Other objects and the track are unchanged |
+| Placed structure | Does the new dash plate appear, and does its boost work? |
+| Moved track point | Does the vehicle follow the new spline? Lap counting OK? |
+| Custom cup | Second page in the cup selection, all races, results screen |
 
 ## 5. If something goes wrong
 
@@ -94,17 +146,21 @@ the edge of the grid.
 | Focus selection | `F` or double-click in the list |
 | Move / rotate / scale | `W` / `E` / `R` |
 | Undo / redo | Ctrl+Z / Ctrl+Y |
+| Place a structure | *Structures* tab, click an entry, click in the 3D view |
+| Edit track spline | `T`, click a point, move it with the gizmo |
+| Magnetism on/off | *Magnetism* checkbox (Tool panel), hold Alt to bypass |
+| Duplicate / delete placed object | Ctrl+D / Del |
 | Save / test in game | Ctrl+S / F5 |
 | Textures on/off | *View → Textures* |
 
 ## Checking without the GUI (optional)
 
 ```bash
-./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision
+./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision, adding objects, track spline; cup patch
 ./build/fzgx-cli dump work 1 | head # list the objects of course 01
 ```
 
-Expected: 37 lines with `OK`, none with `FAIL`.
+Expected: 38 lines with `OK` (37 courses + `cups`), none with `FAIL`.
 
 ## Reporting results
 

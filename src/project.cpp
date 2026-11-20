@@ -80,6 +80,10 @@ void Settings::Load()
       quickstart = value != "0" && value != "false";
     else if (key == "textures")
       textures = value != "0" && value != "false";
+    else if (key == "magnet")
+      magnet = value != "0" && value != "false";
+    else if (key == "magnet_radius")
+      magnet_radius = std::clamp(std::strtof(value.c_str(), nullptr), 1.0f, 1000.0f);
   }
 }
 
@@ -94,7 +98,9 @@ void Settings::Save() const
       << "glinux_user_dir=" << glinux_user_dir.string() << "\n"
       << "launcher=" << launcher << "\n"
       << "quickstart=" << (quickstart ? "true" : "false") << "\n"
-      << "textures=" << (textures ? "true" : "false") << "\n";
+      << "textures=" << (textures ? "true" : "false") << "\n"
+      << "magnet=" << (magnet ? "true" : "false") << "\n"
+      << "magnet_radius=" << magnet_radius << "\n";
 }
 
 std::string Project::CourseFile(int id)
@@ -203,6 +209,14 @@ ModelLibrary Project::BuildModels(int id, const Course& course, std::string* ven
 
 bool Project::EnsureMod(std::string& message)
 {
+  std::error_code ec;
+  // Never write through a link into the original disc.
+  if (fs::is_symlink(settings_.mod(), ec) ||
+      (fs::exists(settings_.mod(), ec) && fs::equivalent(settings_.mod(), settings_.disc(), ec)))
+  {
+    message = "The mod folder points to the original disc; refusing to write. Remove " + settings_.mod().string();
+    return false;
+  }
   if (fs::exists(settings_.mod() / "sys" / "main.dol"))
     return true;
   if (!DiscReady())
@@ -210,11 +224,11 @@ bool Project::EnsureMod(std::string& message)
     message = "The disc has not been extracted.";
     return false;
   }
-  std::error_code ec;
-  fs::create_directories(settings_.mod().parent_path(), ec);
-  // Reflink copy: practically free on btrfs/XFS, falls back to a real copy elsewhere.
+  fs::create_directories(settings_.mod(), ec);
+  // Reflink copy of the disc's contents ("disc/." also works when disc is a link):
+  // practically free on btrfs/XFS, falls back to a real copy elsewhere.
   pid_t pid;
-  const std::string src = settings_.disc().string(), dst = settings_.mod().string();
+  const std::string src = (settings_.disc() / ".").string(), dst = settings_.mod().string();
   const char* argv[] = {"cp", "-a", "--reflink=auto", src.c_str(), dst.c_str(), nullptr};
   if (posix_spawnp(&pid, "cp", nullptr, nullptr, const_cast<char**>(argv), environ) != 0)
   {
@@ -267,6 +281,72 @@ bool Project::RestoreCourse(int id, std::string& message)
     return false;
   }
   message = "Original restored.";
+  return true;
+}
+
+std::optional<TplFile> Project::LoadDiscTpl(const std::string& name) const
+{
+  auto raw = ReadFile(settings_.disc() / "files" / "bmp_e" / (name + ".tpl.lz"));
+  if (!raw)
+    return std::nullopt;
+  try
+  {
+    return TplFile(LzDecompress(*raw));
+  }
+  catch (const FormatError&)
+  {
+    return std::nullopt;
+  }
+}
+
+bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message)
+{
+  if (!EnsureMod(message))
+    return false;
+  if (const std::string problem = ValidateCups(cups); !problem.empty())
+  {
+    message = problem;
+    return false;
+  }
+  const fs::path dol_in = settings_.disc() / "sys" / "main.dol", dol_out = settings_.mod() / "sys" / "main.dol";
+  const fs::path tpl_rel = fs::path("files") / "bmp_e" / "bmp_selgf.tpl.lz";
+  auto dol = ReadFile(dol_in);
+  auto tpl = ReadFile(settings_.disc() / tpl_rel);
+  if (!dol || !tpl)
+  {
+    message = "Original main.dol or bmp_selgf.tpl.lz missing in the extracted disc.";
+    return false;
+  }
+  try
+  {
+    Bytes new_dol = *dol, new_tpl = *tpl;
+    if (!cups.empty())
+    {
+      const Bytes selgf_raw = LzDecompress(*tpl);
+      const TplFile selgf(selgf_raw);
+      auto sel = LoadDiscTpl("bmp_sel");
+      Check(sel.has_value(), "bmp_sel.tpl.lz missing");
+      std::vector<Texture> icons = {LeftArrow(*sel)};
+      for (const auto& c : cups)
+        icons.push_back(CupIcon(selgf, c.hue));
+      new_dol = PatchDol(*dol, cups, selgf.count());
+      const Bytes raw = AppendTextures(selgf_raw, icons);
+      new_tpl = LzCompress(raw);
+      Check(LzDecompress(new_tpl) == raw, "compression was not lossless");
+    }
+    if (!WriteFileAtomic(dol_out, new_dol) || !WriteFileAtomic(settings_.mod() / tpl_rel, new_tpl))
+    {
+      message = "Write failed in " + settings_.mod().string();
+      return false;
+    }
+  }
+  catch (const FormatError& e)
+  {
+    message = std::string("Cups not written: ") + e.what();
+    return false;
+  }
+  message = cups.empty() ? "No custom cups: original main.dol and cup icons restored."
+                         : std::to_string(cups.size()) + " custom cup(s) written to the mod folder.";
   return true;
 }
 

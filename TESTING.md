@@ -140,6 +140,11 @@ saving restores the original files.
   start. Before the fix for workspace paths containing spaces the savestate
   could not be loaded at all and the game stayed in the menu (`launch.log`:
   "command failed: command=load_state").
+- The direct start replaces the disc file table (FST) stored in the savestate
+  with the current one, because every saved course changes file sizes in the
+  mod folder (a stale FST made the game crash on loading the course). When
+  files are added or `main.dol` changes (custom cups, new courses), the
+  savestate is rebuilt automatically (about 30 s, `launch.log` says so).
 
 ## Editor controls
 

@@ -8,7 +8,8 @@
 #   1. Once per GLINUX version the menus are navigated automatically
 #      (Practice > Ruby Cup > Twist Road > Blue Falcon > settings dialog) and a
 #      savestate is taken right before the course is loaded.
-#   2. Every test loads that savestate, writes the course id to the race setup
+#   2. Every test loads that savestate, replaces the stale disc file table (FST)
+#      in it with the current one, writes the course id to the race setup
 #      (byte 0x803FFB71 with the original main.dol: the COLI_COURSExx number the
 #      game loads next) and presses OK. The course itself is then read from the
 #      edited disc folder. The address is taken relative to the main module
@@ -99,6 +100,27 @@ for _ in $(seq 1 600); do
     sleep 0.1
 done
 
+# The disc's file table (FST) is part of every savestate. The mod folder is a
+# virtual disc whose FST changes whenever a file changes size (edited course,
+# custom cups) or files are added, so after loading the savestate the current
+# FST - read from this fresh boot - is written over the stale one. Its length
+# only depends on the file names; when it differs (files added/removed), the
+# savestate is rebuilt. Without this the game reads wrong data and crashes.
+u32() { od -An -tx1 -j"${2:-0}" -N4 "$auto/$1" | tr -d ' \n'; }
+for _ in $(seq 1 300); do
+    cmd "command=read_memory address=0x80000038 size=8 path=fstptr.bin"
+    [[ "$(u32 fstptr.bin 4)" != 00000000 ]] && break
+    sleep 0.1
+done
+fst_size=$((16#$(u32 fstptr.bin 4)))
+# The savestate also holds main.dol's code (custom cups): rebuild when it changes.
+key="$fst_size $(cksum < "$game/sys/main.dol" | cut -d' ' -f1)"
+cmd "command=read_memory address=0x$(u32 fstptr.bin) size=$fst_size path=fst.bin"
+if [[ -f "$state" && "$(cat "$state.key" 2>/dev/null)" != "$key" ]]; then
+    echo "[run-test] disc file list or main.dol changed, rebuilding the quick-start savestate"
+    rm -f "$state"
+fi
+
 # Command values must not contain spaces (the runner splits a command file into
 # key=value lines), so the savestate is passed as a path relative to the
 # automation folder (hard link or copy of the real file).
@@ -106,8 +128,18 @@ if [[ -f "$state" ]]; then
     ln -f "$state" "$auto/quickstart.sav" 2>/dev/null || cp --reflink=auto "$state" "$auto/quickstart.sav"
     cmd "command=load_state path=quickstart.sav"
     sleep 1.5
+    cmd "command=read_memory address=0x80000038 size=8 path=fstptr_state.bin"
+    if (( 16#$(u32 fstptr_state.bin 4) != fst_size )); then
+        echo "[run-test] savestate FST size mismatch; delete $state" >&2
+        wait "$pid"; exit 1
+    fi
+    base=$((16#$(u32 fstptr_state.bin)))
+    for ((off = 0; off < fst_size; off += 4096)); do
+        hex=$(od -An -tx1 -v -j"$off" -N4096 "$auto/fst.bin" | tr -d ' \n')
+        cmd "command=write_memory address=$(printf '0x%X' $((base + off))) data=$hex"
+    done
 else
-    echo "[run-test] building quick-start savestate (one time, about 30 s)"
+    echo "[run-test] building quick-start savestate (about 30 s)"
     # Title screen: wait for the logo, then Start.
     while (( $(frames) < 1500 )); do sleep 0.2; done
     press start 2.5          # -> Select Mode (cursor on Grand Prix)
@@ -126,6 +158,7 @@ else
     cmd "command=save_state path=quickstart.sav"
     sleep 1.5                # saving pauses the core; inputs sent now would be lost
     mv -f "$auto/quickstart.sav" "$state"
+    echo "$key" > "$state.key"
     echo "[run-test] savestate written: $state"
 fi
 

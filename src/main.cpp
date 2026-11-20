@@ -8,6 +8,7 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl3.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
@@ -90,6 +91,8 @@ int main(int argc, char** argv)
   float start_lift = 0, start_scale = 0, start_connect = -1000;
   float start_box[4] = {0, 0, 0, 0}, start_move[3] = {0, 0, 0};
   bool use_box = false;
+  std::string hold_key;
+  int hold_frames = 0;
   bool start_collision = false, no_textures = false, show_cups = false, show_new_course = false;
   for (int i = 1; i < argc; ++i)
   {
@@ -125,6 +128,12 @@ int main(int argc, char** argv)
     {
       for (int k = 0; k < 3; ++k)
         start_move[k] = float(std::atof(argv[++i]));  // after --box: move the selection
+    }
+    else if (a == "--hold" && i + 2 < argc)
+    {
+      // hold a key (up/down/left/right/pageup/pagedown, prefix "alt+") for N frames
+      hold_key = argv[++i];
+      hold_frames = std::atoi(argv[++i]);
     }
     else if (a == "--collision")
       start_collision = true;
@@ -231,6 +240,30 @@ int main(int argc, char** argv)
     const float dt = std::min(0.1f, float(now - last) / 1e9f);
     last = now;
 
+    if (!hold_key.empty())
+    {
+      // Simulated key press (testing): held from frame 2 for hold_frames frames.
+      const bool alt = hold_key.rfind("alt+", 0) == 0;
+      const std::string k = alt ? hold_key.substr(4) : hold_key;
+      const ImGuiKey key = k == "up" ? ImGuiKey_UpArrow : k == "down" ? ImGuiKey_DownArrow
+                         : k == "left" ? ImGuiKey_LeftArrow : k == "right" ? ImGuiKey_RightArrow
+                         : k == "pageup" ? ImGuiKey_PageUp : ImGuiKey_PageDown;
+      if (frame == 2)
+      {
+        editor.DebugCamera("before");
+        if (alt)
+          io.AddKeyEvent(ImGuiMod_Alt, true);
+        io.AddKeyEvent(key, true);
+      }
+      if (frame == 2 + hold_frames)
+      {
+        io.AddKeyEvent(key, false);
+        if (alt)
+          io.AddKeyEvent(ImGuiMod_Alt, false);
+      }
+      if (frame == 4 + hold_frames)
+        editor.DebugCamera("after");
+    }
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
@@ -246,7 +279,8 @@ int main(int argc, char** argv)
     ImGui::Render();
     glViewport(0, 0, fw, fh);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    if (!screenshot.empty() && ++frame == 20)
+    ++frame;
+    if (!screenshot.empty() && frame == std::max(20, hold_frames + 8))
     {
       std::vector<unsigned char> px(std::size_t(fw) * fh * 3);
       glPixelStorei(GL_PACK_ALIGNMENT, 1);

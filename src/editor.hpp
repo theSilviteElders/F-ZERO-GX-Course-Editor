@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <optional>
@@ -91,6 +92,12 @@ public:
   void DebugStart(int course, int select, bool collision, int place = -1, int handle = -1, float lift = 0);
   void ShowCups() { show_cups_ = true; }
   void ShowNewCourse() { show_new_course_ = true; }
+  // Camera position and angles (testing).
+  void DebugCamera(const char* what) const
+  {
+    std::printf("camera %s: pos %.1f %.1f %.1f yaw %.1f pitch %.1f\n", what, cam_.pos.x, cam_.pos.y, cam_.pos.z,
+                cam_.yaw, cam_.pitch);
+  }
   // Scales the selection like the inspector does and prints the model centres (testing).
   void DebugScale(float factor);
   // Duplicates the selection, turns the copy by `yaw` degrees and connects it (testing).

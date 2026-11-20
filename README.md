@@ -68,6 +68,10 @@ editor under *File → Settings* or with
 - **Camera:** hold the right mouse button + WASD/QE to fly (Shift faster,
   Ctrl slower, mouse wheel changes the speed). Without the right mouse button:
   mouse wheel moves forward/back, middle mouse button pans.
+- **Spectator (arrow keys):** without the mouse the camera flies with the arrow
+  keys (Up/Down forward/back along the view direction, Left/Right sideways),
+  Page Up/Page Down move it up/down, Alt+arrows turn it; Shift is faster, Ctrl
+  slower. Not active while typing into a field.
 - **Selection:** left click in the 3D view or in the object list
   (double click focuses), `F` focuses, `Esc` clears the selection.
 - **Multi-selection (Blender-like):** Shift+click adds or removes an object

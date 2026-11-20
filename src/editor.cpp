@@ -1610,6 +1610,33 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
       cam_.pos += (-r * io.MouseDelta.x + u * io.MouseDelta.y) * k;
     }
   }
+  // Spectator: the arrow keys fly the camera without the mouse (Up/Down forward/
+  // back, Left/Right sideways, Page Up/Down up/down; Shift faster, Ctrl slower;
+  // with Alt the arrows turn the camera instead).
+  if (!io.WantTextInput && !ImGui::IsAnyItemActive())
+  {
+    const glm::vec3 f = cam_.Forward();
+    const glm::vec3 r = glm::normalize(glm::cross(f, glm::vec3(0, 1, 0)));
+    const float s = cam_.speed * dt * (io.KeyShift ? 4.0f : 1.0f) * (io.KeyCtrl ? 0.25f : 1.0f);
+    const float turn = 90.0f * dt * (io.KeyShift ? 2.0f : 1.0f);
+    auto down = [](ImGuiKey k) { return ImGui::IsKeyDown(k); };
+    if (io.KeyAlt)
+    {
+      if (down(ImGuiKey_LeftArrow)) cam_.yaw -= turn;
+      if (down(ImGuiKey_RightArrow)) cam_.yaw += turn;
+      if (down(ImGuiKey_UpArrow)) cam_.pitch = std::min(89.0f, cam_.pitch + turn);
+      if (down(ImGuiKey_DownArrow)) cam_.pitch = std::max(-89.0f, cam_.pitch - turn);
+    }
+    else
+    {
+      if (down(ImGuiKey_UpArrow)) cam_.pos += f * s;
+      if (down(ImGuiKey_DownArrow)) cam_.pos -= f * s;
+      if (down(ImGuiKey_RightArrow)) cam_.pos += r * s;
+      if (down(ImGuiKey_LeftArrow)) cam_.pos -= r * s;
+    }
+    if (down(ImGuiKey_PageUp)) cam_.pos.y += s;
+    if (down(ImGuiKey_PageDown)) cam_.pos.y -= s;
+  }
   view_ = cam_.View();
 
   const float nx = (mp.x - vx) / vw * 2 - 1, ny = 1 - (mp.y - vy) / vh * 2;
@@ -2165,7 +2192,8 @@ void Editor::DrawMenu()
   {
     ImGui::TextUnformatted(
         "Camera:    hold right mouse button + WASD/QE to fly, mouse wheel = speed\n"
-        "           mouse wheel = forward/back, middle mouse button = pan\n"
+        "           mouse wheel = forward/back, middle mouse button = pan\n"        "Spectator: arrow keys fly forward/back/sideways, Page Up/Down up/down,\n"
+        "           Alt+arrows turn, Shift faster, Ctrl slower\n"
         "Selection: left click in the 3D view or in the object list,\n"
         "           Shift+click adds/removes, drag a rectangle to box-select\n"
         "           (Shift adds, Ctrl removes); also for track points\n"

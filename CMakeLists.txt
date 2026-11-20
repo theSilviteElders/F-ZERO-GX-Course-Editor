@@ -46,7 +46,7 @@ if(FZGX_BUILD_GUI)
     ${imgui_SOURCE_DIR}/misc/cpp ${imguizmo_SOURCE_DIR})
   target_link_libraries(imgui_lib PUBLIC SDL3::SDL3 OpenGL::GL)
 
-  add_executable(fzgx-editor src/main.cpp src/renderer.cpp src/editor.cpp)
+  add_executable(fzgx-editor src/main.cpp src/renderer.cpp src/editor.cpp src/connectors.cpp)
   target_link_libraries(fzgx-editor PRIVATE fzgx imgui_lib PkgConfig::EPOXY)
   target_compile_options(fzgx-editor PRIVATE -Wall -Wextra)
 endif()

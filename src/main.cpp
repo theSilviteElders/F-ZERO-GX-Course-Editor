@@ -82,12 +82,12 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY] [--scale F]
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY] [--scale F] [--connect YAW]
   // [--cups]:
   // render, save, quit (for testing and documentation).
   std::string screenshot;
   int start_course = -1, start_select = -1, start_place = -1, start_handle = -1;
-  float start_lift = 0, start_scale = 0;
+  float start_lift = 0, start_scale = 0, start_connect = -1000;
   bool start_collision = false, no_textures = false, show_cups = false;
   for (int i = 1; i < argc; ++i)
   {
@@ -110,6 +110,8 @@ int main(int argc, char** argv)
     }
     else if (a == "--scale" && i + 1 < argc)
       start_scale = float(std::atof(argv[++i]));  // scale the selection (--select) in place
+    else if (a == "--connect" && i + 1 < argc)
+      start_connect = float(std::atof(argv[++i]));  // duplicate the selection, turn it, connect it
     else if (a == "--collision")
       start_collision = true;
     else if (a == "--no-textures")
@@ -186,6 +188,8 @@ int main(int argc, char** argv)
   editor.DebugStart(start_course, start_select, start_collision, start_place, start_handle, start_lift);
   if (start_scale > 0)
     editor.DebugScale(start_scale);
+  if (start_connect > -1000)
+    editor.DebugConnect(start_connect);
   if (show_cups)
     editor.ShowCups();
   int frame = 0;

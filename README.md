@@ -83,14 +83,22 @@ editor under *File → Settings* or with
   checkpoints, track distances, track length, distance-based surface areas
   and the checkpoint grid are recomputed on save. Road models and static
   collision (walls) do not move along.
-- **Magnetism:** when moving an object with the gizmo or placing a
-  structure, the closest border vertex of the moved model snaps onto a
-  border vertex of another model within the range (border = vertices on the
-  four horizontal sides of the model's bounding box, e.g. the ends of road
-  pieces, so they join edge to edge); track
-  points snap onto other track points. A pink line shows the snapped pair.
+- **Road edges:** road models (name contains `ROAD`) get *edges*: their open
+  ends, found from the geometry (a planar cross-section loop at an open end,
+  or the short straight ends of road strips lying in one plane). They are drawn
+  orange when open and green when another piece is attached (*View → Road
+  edges*). In the original courses most edges of neighbouring pieces coincide
+  exactly; some road models have no detectable edges.
+- **Magnetism:** when moving a road piece with the gizmo or placing one, an
+  edge snaps onto a fitting edge of another road within the range (similar
+  width, facing each other). Other objects snap the closest border vertex of
+  the model onto a border vertex of another model (border = vertices on the
+  four horizontal sides of the bounding box); track points snap onto other
+  track points. A pink line/outline shows what snapped.
   Switch it off with the *Magnetism* checkbox (saved in `work/editor.ini`
   together with the range) or hold **Alt** to move freely for a moment.
+- **Connect (`C`):** moves *and turns* the selected road piece so that its
+  nearest open edge joins the nearest open edge of another road (one undo step).
 - **Ctrl+Z / Ctrl+Y:** undo / redo.
 - **Ctrl+S:** saves the compressed course into `work/mod/GFZE01`.
 - **F5:** saves and starts the game from the mod folder directly in a race on

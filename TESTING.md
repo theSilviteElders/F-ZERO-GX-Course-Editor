@@ -154,6 +154,7 @@ saving restores the original files.
 | Place a structure | *Structures* tab, click an entry, click in the 3D view |
 | Edit track spline | `T`, click a point, move it with the gizmo |
 | Magnetism on/off | *Magnetism* checkbox (Tool panel), hold Alt to bypass |
+| Join a road piece to an open road edge | select it, `C` (or *Connect* in the inspector) |
 | Duplicate / delete placed object | Ctrl+D / Del |
 | Save / test in game | Ctrl+S / F5 |
 | Textures on/off | *View → Textures* |

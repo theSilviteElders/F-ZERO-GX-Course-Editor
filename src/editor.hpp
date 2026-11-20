@@ -1,4 +1,5 @@
 #pragma once
+#include "connectors.hpp"
 #include "project.hpp"
 #include "renderer.hpp"
 
@@ -91,6 +92,8 @@ public:
   void ShowCups() { show_cups_ = true; }
   // Scales the selection like the inspector does and prints the model centres (testing).
   void DebugScale(float factor);
+  // Duplicates the selection, turns the copy by `yaw` degrees and connects it (testing).
+  void DebugConnect(float yaw);
 
 private:
   // Course handling
@@ -144,6 +147,23 @@ private:
   // Border vertices of a model (cached): unique vertices on the four
   // horizontal sides of its bounding box, where pieces connect (road ends).
   const std::vector<glm::vec3>& BorderVertices(const std::string& name);
+  // Road edges: connectors of road models (name contains "ROAD"), cached per model.
+  const std::vector<Connector>& Connectors(int i);
+  // Connectors of object i in world space (matrix pre-multiplied by `pre`).
+  std::vector<Connector> WorldConnectors(int i, const glm::mat4& pre = glm::mat4(1));
+  // World-space connectors of all roads (owner, connector).
+  std::vector<std::pair<int, Connector>> AllConnectors();
+  // A connector is open when no connector of another object lies on it.
+  bool ConnectorOpen(int owner, const Connector& c, const std::vector<std::pair<int, Connector>>& all);
+  // Offset that puts an open road edge of `sources` onto a fitting edge of another
+  // road within the range (translation only).
+  bool SnapConnectors(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                      glm::vec3& offset);
+  // Road edges first; objects without edges snap vertex to vertex.
+  bool Snap(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre, glm::vec3& offset);
+  // Moves and turns the selected road so that its nearest open edge joins the
+  // nearest fitting open edge of another road (one undo step).
+  bool ConnectSelection();
 
   // Placing structures
   void BuildStructures();
@@ -245,9 +265,12 @@ private:
   {
     bool valid = false;
     glm::vec3 from{0}, to{0};
+    std::vector<glm::vec3> edges;  // outlines of the joined road edges (line list)
   };
   SnapLine snap_line_, snap_line_draw_;
   std::map<std::string, std::vector<glm::vec3>> vertex_cache_;
+  std::map<std::string, std::vector<Connector>> connector_cache_;
+  bool show_edges_ = true;
   // Placed object -> the objects and polygons placed together with it.
   std::map<int, std::pair<std::vector<int>, std::vector<int>>> spawn_groups_;
 

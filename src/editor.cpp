@@ -225,6 +225,7 @@ void Editor::CloseCourse()
   structures_.clear();
   spawn_groups_.clear();
   vertex_cache_.clear();
+  connector_cache_.clear();
   snap_line_ = snap_line_draw_ = {};
   handles_.clear();
   handle_ = -1;
@@ -654,11 +655,161 @@ bool Editor::SnapVertices(const std::vector<int>& sources, const std::vector<int
               best = d2;
               found = true;
               offset = d;
-              snap_line_ = {true, p, q};
+              snap_line_ = {true, p, q, {}};
             }
           }
         }
   return found;
+}
+
+const std::vector<Connector>& Editor::Connectors(int i)
+{
+  static const std::vector<Connector> none;
+  const auto& in = course_->instances()[i];
+  if (in.name.find("ROAD") == std::string::npos)
+    return none;
+  auto it = connector_cache_.find(in.name);
+  if (it != connector_cache_.end())
+    return it->second;
+  std::vector<Connector>& out = connector_cache_[in.name];
+  if (const ModelMesh* m = models_->Find(in.name); m && !m->positions.empty())
+    out = FindConnectors(*m);
+  return out;
+}
+
+std::vector<Connector> Editor::WorldConnectors(int i, const glm::mat4& pre)
+{
+  std::vector<Connector> out;
+  const glm::mat4 M = pre * ToGlm(course_->instances()[i].matrix);
+  for (const auto& c : Connectors(i))
+    out.push_back(TransformConnector(c, M));
+  return out;
+}
+
+std::vector<std::pair<int, Connector>> Editor::AllConnectors()
+{
+  std::vector<std::pair<int, Connector>> out;
+  const auto& list = course_->instances();
+  for (int j = 0; j < int(list.size()); ++j)
+    if (!list[j].removed && !Connectors(j).empty())
+      for (auto& c : WorldConnectors(j))
+        out.emplace_back(j, std::move(c));
+  return out;
+}
+
+bool Editor::ConnectorOpen(int owner, const Connector& c, const std::vector<std::pair<int, Connector>>& all)
+{
+  for (const auto& [j, o] : all)
+    if (j != owner && ConnectorsFit(c, o, -0.7f, 3.0f))
+      return false;
+  return true;
+}
+
+bool Editor::SnapConnectors(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                            glm::vec3& offset)
+{
+  const float r = project_.settings().magnet_radius;
+  const auto& list = course_->instances();
+  std::vector<Connector> from;
+  for (int i : sources)
+    for (auto& c : WorldConnectors(i, pre))
+      from.push_back(std::move(c));
+  if (from.empty())
+    return false;
+  float best = r;
+  bool found = false;
+  for (int j = 0; j < int(list.size()); ++j)
+  {
+    if (list[j].removed || Connectors(j).empty() || std::find(exclude.begin(), exclude.end(), j) != exclude.end())
+      continue;
+    for (const auto& to : WorldConnectors(j))
+      for (const auto& f : from)
+      {
+        const float d = glm::distance(f.centre, to.centre);
+        if (d < best && ConnectorsFit(f, to, -0.7f, r))
+        {
+          best = d;
+          found = true;
+          offset = to.centre - f.centre;
+          snap_line_ = {true, f.centre, to.centre, f.lines};
+          snap_line_.edges.insert(snap_line_.edges.end(), to.lines.begin(), to.lines.end());
+        }
+      }
+  }
+  return found;
+}
+
+bool Editor::Snap(const std::vector<int>& sources, const std::vector<int>& exclude, const glm::mat4& pre,
+                  glm::vec3& offset)
+{
+  for (int i : sources)
+    if (!Connectors(i).empty())
+      return SnapConnectors(sources, exclude, pre, offset);
+  return SnapVertices(sources, exclude, pre, offset);
+}
+
+bool Editor::ConnectSelection()
+{
+  if (!course_ || selected_ < 0 || Connectors(selected_).empty())
+  {
+    Status("Connect: select a road piece (a model with road edges) first.", true);
+    return false;
+  }
+  std::vector<int> exclude = Linked(selected_);
+  exclude.push_back(selected_);
+  const auto& list = course_->instances();
+  // Nearest pair (open edge of the selection, open fitting edge of another road).
+  float best = 1e30f;
+  Connector src, dst;
+  int target = -1;
+  const auto all = AllConnectors();
+  std::vector<Connector> mine;
+  for (auto& c : WorldConnectors(selected_))
+    if (ConnectorOpen(selected_, c, all))
+      mine.push_back(std::move(c));
+  for (const auto& [j, to] : all)
+  {
+    if (std::find(exclude.begin(), exclude.end(), j) != exclude.end())
+      continue;
+    for (const auto& f : mine)
+    {
+      const float d = glm::distance(f.centre, to.centre);
+      if (d < best && ConnectorsFit(f, to, 1.0f, 1e30f) && ConnectorOpen(j, to, all))
+        best = d, src = f, dst = to, target = j;
+    }
+  }
+  if (target < 0)
+  {
+    Status("Connect: no open road edge of a similar width found.", true);
+    return false;
+  }
+  const glm::mat4 T = ConnectTransform(src, dst);
+  Vec3 pos, rot, scl;
+  if (!DecomposeMatrix(FromGlm(T * ToGlm(list[selected_].matrix)), pos, rot, scl))
+    return false;
+  Transform t;
+  t.position = pos;
+  t.rotation = {DegToAngle(rot[0]), DegToAngle(rot[1]), DegToAngle(rot[2])};
+  t.scale = scl;
+  t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+  // The quantised angles turn the piece a tiny bit: put the edge centre back exactly.
+  const glm::mat4 pre = ToGlm(t.matrix) * glm::inverse(ToGlm(list[selected_].matrix));
+  for (const auto& c : WorldConnectors(selected_, pre))
+    if (glm::distance(c.centre, dst.centre) < 50)
+    {
+      const glm::vec3 d = dst.centre - c.centre;
+      for (int k = 0; k < 3; ++k)
+        t.position[k] += d[k];
+      t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+      break;
+    }
+  BeginEdit();
+  ApplyPrimary(t);
+  EndEdit();
+  snap_line_ = {true, src.centre, dst.centre, dst.lines};
+  Status("Connected " + list[selected_].name + " to " + list[target].name + " (#" + std::to_string(target) +
+         "). Ctrl+Z undoes.");
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -958,7 +1109,7 @@ void Editor::DebugStart(int course, int select, bool collision, int place, int h
     glm::vec3 offset(60, 0, 0);
     if (const char* env = std::getenv("FZGX_PLACE_OFFSET"))
       std::sscanf(env, "%f %f %f", &offset.x, &offset.y, &offset.z);
-    if (glm::vec3 snap; MagnetActive() && SnapVertices(structures_[place].members, {}, glm::translate(glm::mat4(1), offset), snap))
+    if (glm::vec3 snap; MagnetActive() && Snap(structures_[place].members, {}, glm::translate(glm::mat4(1), offset), snap))
     {
       std::printf("magnet: offset %.2f %.2f %.2f snapped by %.2f %.2f %.2f\n", offset.x, offset.y, offset.z, snap.x, snap.y, snap.z);
       offset += snap;
@@ -998,6 +1149,34 @@ void Editor::DebugScale(float factor)
                 course_->instances()[objs[k]].name.c_str(), a.x, a.y, a.z, b.x, b.y, b.z,
                 course_->instances()[objs[k]].scale[0]);
   }
+}
+
+void Editor::DebugConnect(float yaw)
+{
+  if (!course_ || selected_ < 0)
+    return;
+  DuplicateSelection();
+  Transform t = Get(selected_);
+  t.rotation[1] = std::int16_t(t.rotation[1] + DegToAngle(yaw));
+  t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+  BeginEdit();
+  ApplyPrimary(t);
+  EndEdit();
+  if (!ConnectSelection())
+  {
+    std::printf("connect: %s\n", status_.c_str());
+    return;
+  }
+  // Report how well the joined edges match.
+  float best = 1e30f, facing = 0;
+  for (const auto& a : WorldConnectors(selected_))
+    for (int j = 0; j < int(course_->instances().size()); ++j)
+      if (j != selected_ && !course_->instances()[j].removed)
+        for (const auto& b : WorldConnectors(j))
+          if (const float d = glm::distance(a.centre, b.centre); d < best)
+            best = d, facing = glm::dot(a.normal, b.normal);
+  std::printf("connect: %s\nconnect: edge distance %.3f, normal dot %.4f\n", status_.c_str(), best, facing);
+  FocusSelection();
 }
 
 void Editor::RequestQuit()
@@ -1165,6 +1344,8 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
         FocusSelection();
       if (ImGui::IsKeyPressed(ImGuiKey_T) && course_)
         SetTrackMode(!track_mode_);
+      if (ImGui::IsKeyPressed(ImGuiKey_C) && course_ && !track_mode_ && selected_ >= 0)
+        ConnectSelection();
       if (ImGui::IsKeyPressed(ImGuiKey_Escape))
       {
         if (armed_ >= 0)
@@ -1259,7 +1440,7 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
       }
       const Structure& st = structures_[armed_];
       place_offset_ = hover_ - st.anchor;
-      if (glm::vec3 snap; MagnetActive() && SnapVertices(st.members, {}, glm::translate(glm::mat4(1), place_offset_), snap))
+      if (glm::vec3 snap; MagnetActive() && Snap(st.members, {}, glm::translate(glm::mat4(1), place_offset_), snap))
         place_offset_ += snap;
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
       {
@@ -1405,8 +1586,31 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
                  i == handle_ ? Rgba(255, 255, 255) : Rgba(255, 140, 40));
         }
     }
+    if (show_edges_ && !track_mode_)
+    {
+      // Road edges: open ones orange, connected ones green, those of the selection brighter.
+      const auto all = AllConnectors();
+      for (const auto& [i, c] : all)
+      {
+        const bool sel = i == selected_;
+        {
+          const bool open = ConnectorOpen(i, c, all);
+          const std::uint32_t col = open ? (sel ? Rgba(255, 170, 40) : Rgba(255, 120, 30, 220))
+                                         : (sel ? Rgba(120, 255, 140) : Rgba(60, 200, 90, 150));
+          for (const auto& p : c.lines)
+            lines.push_back({p + c.normal * 0.3f, col});
+          if (open && sel)
+          {
+            lines.push_back({c.centre, col});
+            lines.push_back({c.centre + c.normal * (c.width * 0.25f), col});
+          }
+        }
+      }
+    }
     if (snap_line_draw_.valid)
     {
+      for (const auto& p : snap_line_draw_.edges)
+        lines.push_back({p, Rgba(255, 60, 255)});
       // Magnetism: the vertex that snapped and its target.
       const glm::vec3 a = snap_line_draw_.from, b = snap_line_draw_.to;
       const float r = std::max(1.5f, glm::distance(b, cam_.pos) * 0.006f);
@@ -1511,7 +1715,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
           {
             best = d;
             delta = {q[0] - handle_start_[0], q[1] - handle_start_[1], q[2] - handle_start_[2]};
-            snap_line_ = {true, target, glm::vec3(q[0], q[1], q[2])};
+            snap_line_ = {true, target, glm::vec3(q[0], q[1], q[2]), {}};
           }
         }
       }
@@ -1583,7 +1787,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
           std::vector<int> exclude = Linked(selected_);
           exclude.push_back(selected_);
           const glm::mat4 pre = ToGlm(t.matrix) * glm::inverse(ToGlm(course_->instances()[selected_].matrix));
-          if (glm::vec3 snap; SnapVertices({selected_}, exclude, pre, snap))
+          if (glm::vec3 snap; Snap({selected_}, exclude, pre, snap))
           {
             for (int k = 0; k < 3; ++k)
               t.position[k] += snap[k];
@@ -1648,6 +1852,8 @@ void Editor::DrawMenu()
       DuplicateSelection();
     if (ImGui::MenuItem("Delete placed object", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
       DeleteSelection();
+    if (ImGui::MenuItem("Connect road to nearest open edge", "C", false, selected_ >= 0 && !track_mode_))
+      ConnectSelection();
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("View"))
@@ -1662,6 +1868,7 @@ void Editor::DrawMenu()
     ImGui::MenuItem("Placeholders (missing/animated models)", nullptr, &show_missing_);
     ImGui::MenuItem("Track path (checkpoints)", nullptr, &show_track_);
     ImGui::MenuItem("Collision (static, yellow = boost)", nullptr, &show_collision_);
+    ImGui::MenuItem("Road edges (orange = open, green = connected)", nullptr, &show_edges_);
     ImGui::Separator();
     if (ImGui::MenuItem("Frame whole course"))
       FrameCourse();
@@ -1678,8 +1885,11 @@ void Editor::DrawMenu()
         "Gizmo:     W move, E rotate, R scale, F focus\n"
         "Track:     T toggles track editing: click a point on the track line,\n"
         "           move it with the gizmo (checkpoints follow, road models do not)\n"
-        "Magnetism: moved objects snap onto nearby vertices, track points onto\n"
-        "           other track points (Tool panel), hold Alt to move freely\n"
+        "Magnetism: road pieces snap edge to edge (orange = open road edge),\n"
+        "           other objects onto nearby vertices, track points onto other\n"
+        "           track points (Tool panel), hold Alt to move freely\n"
+        "Connect:   C joins the selected road to the nearest open road edge\n"
+        "           (moves and turns it)\n"
         "Place:     Structures tab, pick an entry, click in the 3D view\n"
         "           (Shift+click places several), Ctrl+D duplicate, Del delete\n"
         "File:      Ctrl+S save (into the mod folder), F5 test in game\n\n"
@@ -2079,6 +2289,21 @@ void Editor::DrawInspector(float x, float y, float w, float h)
       }
       ImGui::PopID();
     }
+  }
+
+  if (!Connectors(selected_).empty())
+  {
+    int open = 0;
+    const auto all = AllConnectors();
+    const auto edges = WorldConnectors(selected_);
+    for (const auto& c : edges)
+      open += ConnectorOpen(selected_, c, all);
+    ImGui::SeparatorText("Road edges");
+    ImGui::Text("%zu edges, %d open", edges.size(), open);
+    ImGui::SetItemTooltip("Open ends of this road model where another piece attaches.\n"
+                          "With magnetism, moving the piece snaps an edge onto a fitting edge.");
+    if (ImGui::Button("Connect to nearest open edge (C)", {-1, 0}))
+      ConnectSelection();
   }
 
   ImGui::Spacing();

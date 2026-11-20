@@ -5,3 +5,5 @@ work/
 rom/
 *.rvz
 *.iso
+.todos.md
+__pycache__/

@@ -88,6 +88,7 @@ public:
   bool WantsQuit() const { return quit_; }
   void RequestQuit();
   void DebugStart(int course, int select, bool collision, int place = -1, int handle = -1, float lift = 0);
+  void ShowCups() { show_cups_ = true; }
 
 private:
   // Course handling
@@ -152,7 +153,11 @@ private:
   void DrawStructurePanel();
   void DrawInspector(float x, float y, float w, float h);
   void DrawSettings();
+  void DrawCups();
   void DrawPopups();
+  // Writes the custom cups into the mod folder (false + status on error).
+  bool ApplyCups();
+  unsigned CupIconTexture(int cup);
   void DrawStatus(float x, float y, float w);
   void HandleViewportInput(float vx, float vy, float vw, float vh, float dt);
   void RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy, float vw, float vh);
@@ -237,6 +242,14 @@ private:
   std::map<std::string, std::vector<glm::vec3>> vertex_cache_;
   // Placed object -> the objects and polygons placed together with it.
   std::map<int, std::pair<std::vector<int>, std::vector<int>>> spawn_groups_;
+
+  // Custom cups (work/cups.ini)
+  std::vector<CupDef> cups_;
+  bool show_cups_ = false;
+  bool cups_dirty_ = false;
+  std::optional<TplFile> selgf_;           // original cup icons, loaded on demand
+  std::vector<unsigned> cup_icons_;        // preview textures per custom cup
+  std::vector<float> cup_icon_hue_;
 
   // Popups / status
   int pending_course_ = -1;

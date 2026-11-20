@@ -79,6 +79,22 @@ In the game: does the vehicle drive over the invisible hill (follows the
 spline), or along the road model? Does the course load, do lap counting and
 the position display still work?
 
+## 2d. Create a custom cup
+
+1. *File → Cups…*, then *Add custom cup*. Give it a name, pick a gem colour
+   and choose up to five courses (*Add course* adds the open course).
+2. *Save cups and write mod folder*.
+3. Switch the direct start off (*File → Settings*) and press **F5**. In the
+   game go to Grand Prix, pick a class, and in the cup selection move right
+   past the AX Cup (or past the last unlocked cup): an arrow leads to a second
+   page with your cups.
+4. Pick your cup: the cup intro and the course screen should show your cup's
+   icon, name and courses, and the first race should be your first course.
+
+Most interesting to report: does a whole Grand Prix in the custom cup work to
+the end (next races, results screen, ranking)? Removing all custom cups and
+saving restores the original files.
+
 ## 3. Save and start the game
 
 - **F5** saves the course and starts GLINUX **directly in a race** on the open
@@ -101,6 +117,7 @@ the position display still work?
 | Rest of the course | Other objects and the track are unchanged |
 | Placed structure | Does the new dash plate appear, and does its boost work? |
 | Moved track point | Does the vehicle follow the new spline? Lap counting OK? |
+| Custom cup | Second page in the cup selection, all races, results screen |
 
 ## 5. If something goes wrong
 
@@ -137,11 +154,11 @@ the position display still work?
 ## Checking without the GUI (optional)
 
 ```bash
-./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision, adding objects, track spline
+./build/fzgx-cli selftest work      # all 37 courses: parsing, round trip, compression, collision, adding objects, track spline; cup patch
 ./build/fzgx-cli dump work 1 | head # list the objects of course 01
 ```
 
-Expected: 37 lines with `OK`, none with `FAIL`.
+Expected: 38 lines with `OK` (37 courses + `cups`), none with `FAIL`.
 
 ## Reporting results
 

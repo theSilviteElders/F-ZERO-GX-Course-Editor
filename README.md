@@ -55,6 +55,7 @@ A step-by-step test guide is in [TESTING.md](TESTING.md).
 | `work/glinux-runtime/` | unpacked GLINUX AppImage + direct-start savestate (`quickstart-practice.sav`) |
 | `work/test-userdir/` | separate copy of the GLINUX user folder for tests (protects your saves) |
 | `work/editor.ini` | settings (ROM, AppImage, GLINUX user folder, launcher) |
+| `work/cups.ini` | custom cups (name, courses, icon colour) |
 | `work/launch.log` | output of the last game launch |
 
 The disc is extracted with `dolphin-tool` (Dolphin Flatpak), either in the
@@ -95,6 +96,14 @@ editor under *File → Settings* or with
   the open course (see *Direct start*).
 - **Linked objects** (e.g. dash plate + arrow marker + ring) are edited
   together: same name prefix, within the radius.
+- **Cups:** the course list shows each course's track name and the cups it
+  belongs to. *File → Cups…* lists the game's cups and lets you create up to
+  two **custom Grand Prix cups** (name, gem colour of the icon, up to five
+  courses). *Save cups and write mod folder* (and every F5) writes a patched
+  `sys/main.dol` and the icons into the mod folder. In the game the cup
+  selection gets an arrow behind the AX Cup that leads to a second page with
+  the custom cups. Start the game normally (direct start off) to pick them.
+  Details: [docs/cup-format.md](docs/cup-format.md).
 - **Textures:** *View → Textures* or *File → Settings → Load textures*
   (on by default, saved in `work/editor.ini`). Without textures the models are
   drawn in their material colour, which is lighter and faster.
@@ -112,7 +121,8 @@ savestates):
    **`0x803FFB71`** (u8, the number of the `COLI_COURSExx.lz` the game loads
    next; found by comparing RAM for the five Ruby Cup courses and cross-checked
    with course 14 → Big Blue) and press OK. The course is then loaded from the
-   mod folder.
+   mod folder. The address is computed relative to the main module
+   (`[0x800030C8] + 0x245471`), because the custom-cup patch moves it.
 
 NTSC-U (`GFZE01`) only. There is no direct start with Dolphin as launcher.
 
@@ -177,6 +187,10 @@ and write to a separate file), `unlz`, `lz`.
 - Textures use only the first layer and the first UV set (no multi-texture
   blending, texture scrolling or environment maps).
 - Generated road models for new track pieces, snapping track pieces together.
+- Custom cups: at most two, only in Grand Prix (not Time Attack/Practice),
+  NTSC-U only. Menus, cup intro, course screen and the first race are tested
+  in the game; a complete Grand Prix to the results screen is not tested yet.
+  The glow of the selected custom cup icon uses the AX Cup colour.
 
 ## AI disclosure
 

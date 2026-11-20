@@ -202,6 +202,44 @@ static int SelfTest(const fs::path& workspace)
                 course.collision().triangles.size() / 3, poly_err, add_ok ? "ok" : "FAIL", course.segments().size(), anchor_err, grid_missing, grid_extra, track_ok ? "ok" : "FAIL", raw.size(), packed.size(), (long long)ms);
   }
   std::printf("lz total: original %zu, ours %zu bytes\n", total_in, total_out);
+
+  // Custom cups: main.dol patch and icon textures (nothing is written).
+  {
+    bool ok = false;
+    std::string what;
+    try
+    {
+      const auto dol = ReadFile(s.disc() / "sys" / "main.dol");
+      const Bytes selgf_raw = LzDecompress(*ReadFile(s.disc() / "files" / "bmp_e" / "bmp_selgf.tpl.lz"));
+      const TplFile selgf(selgf_raw);
+      const auto sel = project.LoadDiscTpl("bmp_sel");
+      const std::vector<CupDef> cups = {{"Self Test", {7, 13, 21, 25, 27}, 200}, {"Two", {1}, 60}};
+      const Bytes patched = PatchDol(*dol, cups, selgf.count());
+      const Texture icon = CupIcon(selgf, 200), arrow = LeftArrow(*sel);
+      const TplFile out(AppendTextures(selgf_raw, {arrow, icon}));
+      bool same = out.count() == selgf.count() + 2;
+      for (int i = 0; same && i < selgf.count(); ++i)
+      {
+        const auto a = selgf.Decode(i), b = out.Decode(i);
+        same = a.has_value() == b.has_value() && (!a || a->rgba == b->rgba);
+      }
+      const auto back = out.Decode(selgf.count() + 1);
+      // RGB5A3 keeps 5 bits per channel for opaque pixels.
+      bool icon_ok = back && back->width == icon.width && back->height == icon.height;
+      for (std::size_t i = 0; icon_ok && i < icon.rgba.size(); ++i)
+        icon_ok = std::abs(int(back->rgba[i]) - int(icon.rgba[i])) <= 36;
+      ok = patched.size() > dol->size() && same && icon_ok;
+      what = "dol " + std::to_string(dol->size()) + "->" + std::to_string(patched.size()) +
+             " textures " + std::to_string(selgf.count()) + "->" + std::to_string(out.count()) +
+             (same ? "" : " ORIGINAL-TEXTURES-CHANGED") + (icon_ok ? "" : " ICON-MISMATCH");
+    }
+    catch (const std::exception& e)
+    {
+      what = e.what();
+    }
+    std::printf("%s cups: %s\n", ok ? "OK  " : "FAIL", what.c_str());
+    failures += !ok;
+  }
   return failures ? 1 : 0;
 }
 
@@ -328,7 +366,17 @@ int main(int argc, char** argv)
         return 1;
       return WriteFileAtomic(argv[3], cmd == "lz" ? LzCompress(*in) : LzDecompress(*in)) ? 0 : 1;
     }
-    std::cerr << "usage: fzgx-cli selftest <workspace> | unlz <in> <out> | lz <in> <out>\n";
+    if (cmd == "cups" && argc == 3)
+    {
+      Settings st;
+      st.workspace = argv[2];
+      Project pr(st);
+      std::string msg;
+      const bool ok = pr.ApplyCups(LoadCups(st.cups_file()), msg);
+      std::cout << msg << "\n";
+      return ok ? 0 : 1;
+    }
+    std::cerr << "usage: fzgx-cli selftest <workspace> | cups <workspace> | unlz <in> <out> | lz <in> <out>\n";
     return 2;
   }
   catch (const std::exception& e)

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -130,6 +131,8 @@ Editor::Editor(Settings settings) : project_(std::move(settings)) {}
 
 Editor::~Editor()
 {
+  for (auto& t : cup_icons_)
+    renderer_.FreeTexture(t);
   CloseCourse();
   renderer_.Shutdown();
 }
@@ -139,6 +142,7 @@ bool Editor::Init()
   if (!renderer_.Init())
     return false;
   RefreshCourses();
+  cups_ = LoadCups(project_.settings().cups_file());
   if (!project_.DiscReady())
   {
     show_settings_ = true;
@@ -881,6 +885,8 @@ void Editor::Launch()
 {
   if (dirty_ && !Save())
     return;
+  if (!ApplyCups())
+    return;
   std::string msg;
   const bool quick = project_.settings().quickstart && project_.settings().launcher == "glinux";
   const bool ok = project_.Launch(course_id_, msg);
@@ -1126,6 +1132,7 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
   DrawInspector(W - kRightWidth, menu_h, kRightWidth, H - menu_h - kStatusHeight);
   DrawStatus(0, H - kStatusHeight, W);
   DrawSettings();
+  DrawCups();
   DrawPopups();
 
   HandleViewportInput(vx, vy, vw, vh, dt);
@@ -1547,6 +1554,8 @@ void Editor::DrawMenu()
     }
     if (ImGui::MenuItem("Settings…"))
       show_settings_ = true;
+    if (ImGui::MenuItem("Cups…"))
+      show_cups_ = true;
     ImGui::Separator();
     if (ImGui::MenuItem("Quit"))
       RequestQuit();
@@ -1626,14 +1635,25 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
   {
     for (const auto& c : courses_)
     {
-      char label[64];
-      std::snprintf(label, sizeof label, "%s Course %02d", c.modified ? "*" : " ", c.id);
+      char label[96];
+      std::snprintf(label, sizeof label, "%s %02d  %s##course%d", c.modified ? "*" : " ", c.id,
+                    *CourseName(c.id) ? CourseName(c.id) : "(special)", c.id);
       if (ImGui::Selectable(label, c.id == course_id_) && c.id != course_id_)
       {
         if (dirty_)
           pending_course_ = c.id;
         else
           OpenCourse(c.id);
+      }
+      std::string cups;
+      for (const auto& name : CupsOfCourse(c.id, cups_))
+        cups += (cups.empty() ? "" : ", ") + name;
+      if (!cups.empty())
+      {
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
+        ImGui::TextDisabled("%s", cups.c_str());
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("%s", cups.c_str());
       }
     }
     ImGui::EndListBox();
@@ -2101,6 +2121,187 @@ void Editor::DrawSettings()
     s.Save();
     Status("Settings saved: " + s.file().string());
   }
+  ImGui::End();
+}
+
+bool Editor::ApplyCups()
+{
+  std::string msg;
+  const bool ok = project_.ApplyCups(cups_, msg);
+  if (!ok)
+    Status(msg, true);
+  return ok;
+}
+
+unsigned Editor::CupIconTexture(int cup)
+{
+  if (!selgf_)
+    selgf_ = project_.LoadDiscTpl("bmp_selgf");
+  if (!selgf_)
+    return 0;
+  cup_icons_.resize(cups_.size(), 0);
+  cup_icon_hue_.resize(cups_.size(), -1);
+  if (cup_icons_[cup] == 0 || cup_icon_hue_[cup] != cups_[cup].hue)
+  {
+    renderer_.FreeTexture(cup_icons_[cup]);
+    try
+    {
+      cup_icons_[cup] = renderer_.CreateTexture(CupIcon(*selgf_, cups_[cup].hue), 0);
+    }
+    catch (const FormatError&)
+    {
+      cup_icons_[cup] = 0;
+    }
+    cup_icon_hue_[cup] = cups_[cup].hue;
+  }
+  return cup_icons_[cup];
+}
+
+void Editor::DrawCups()
+{
+  if (!show_cups_)
+    return;
+  ImGui::SetNextWindowSize({640, 560}, ImGuiCond_Appearing);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+  if (!ImGui::Begin("Cups", &show_cups_))
+  {
+    ImGui::End();
+    return;
+  }
+  auto course_label = [](int id) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%02d  %s", id, CourseName(id));
+    return std::string(buf);
+  };
+
+  ImGui::SeparatorText("Game cups (Grand Prix)");
+  if (ImGui::BeginTable("##orig", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
+  {
+    for (const auto& c : OriginalCups())
+    {
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(c.name);
+      ImGui::TableNextColumn();
+      std::string list;
+      for (const int id : c.courses)
+        list += (list.empty() ? "" : ", ") + std::string(CourseName(id));
+      ImGui::TextDisabled("%s", list.c_str());
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::SeparatorText("Custom cups");
+  ImGui::TextWrapped("Custom cups appear in Grand Prix behind the AX Cup: an arrow leads to a second page "
+                     "with these cups. Up to %d cups with up to %d courses each.",
+                     kMaxCustomCups, kMaxCupCourses);
+  std::vector<int> race_courses;
+  for (const auto& c : courses_)
+    if (*CourseName(c.id))
+      race_courses.push_back(c.id);
+
+  int remove_cup = -1;
+  for (int i = 0; i < int(cups_.size()); ++i)
+  {
+    CupDef& cup = cups_[i];
+    ImGui::PushID(i);
+    ImGui::Separator();
+    if (const unsigned tex = CupIconTexture(i))
+    {
+      ImGui::Image(ImTextureID(std::intptr_t(tex)), {46, 58});
+      ImGui::SameLine();
+    }
+    ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::InputText("Name", &cup.name))
+      cups_dirty_ = true;
+    ImGui::SetNextItemWidth(240);
+    if (ImGui::SliderFloat("Gem colour", &cup.hue, 0, 359, "%.0f°"))
+      cups_dirty_ = true;
+    ImGui::EndGroup();
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 90);
+    if (ImGui::Button("Remove cup"))
+      remove_cup = i;
+
+    int remove_course = -1;
+    for (int k = 0; k < int(cup.courses.size()); ++k)
+    {
+      ImGui::PushID(k);
+      ImGui::Text("Race %d", k + 1);
+      ImGui::SameLine(70);
+      ImGui::SetNextItemWidth(260);
+      if (ImGui::BeginCombo("##course", course_label(cup.courses[k]).c_str()))
+      {
+        for (const int id : race_courses)
+          if (ImGui::Selectable(course_label(id).c_str(), id == cup.courses[k]))
+          {
+            cup.courses[k] = id;
+            cups_dirty_ = true;
+          }
+        ImGui::EndCombo();
+      }
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Remove"))
+        remove_course = k;
+      ImGui::PopID();
+    }
+    if (remove_course >= 0)
+    {
+      cup.courses.erase(cup.courses.begin() + remove_course);
+      cups_dirty_ = true;
+    }
+    ImGui::BeginDisabled(int(cup.courses.size()) >= kMaxCupCourses || race_courses.empty());
+    if (ImGui::Button("Add course"))
+    {
+      cup.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+      cups_dirty_ = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::PopID();
+  }
+  if (remove_cup >= 0)
+  {
+    cups_.erase(cups_.begin() + remove_cup);
+    if (remove_cup < int(cup_icons_.size()))
+    {
+      renderer_.FreeTexture(cup_icons_[remove_cup]);
+      cup_icons_.erase(cup_icons_.begin() + remove_cup);
+      cup_icon_hue_.erase(cup_icon_hue_.begin() + remove_cup);
+    }
+    cups_dirty_ = true;
+  }
+  ImGui::Separator();
+  ImGui::BeginDisabled(int(cups_.size()) >= kMaxCustomCups || race_courses.empty());
+  if (ImGui::Button("Add custom cup"))
+  {
+    CupDef c;
+    c.name = "Custom Cup " + std::to_string(cups_.size() + 1);
+    c.hue = cups_.empty() ? 30.0f : 200.0f;
+    c.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+    cups_.push_back(c);
+    cups_dirty_ = true;
+  }
+  ImGui::EndDisabled();
+
+  const std::string problem = ValidateCups(cups_);
+  if (!problem.empty())
+    ImGui::TextColored({1, 0.4f, 0.4f, 1}, "%s", problem.c_str());
+  ImGui::BeginDisabled(!problem.empty());
+  if (ImGui::Button(cups_dirty_ ? "Save cups and write mod folder *" : "Save cups and write mod folder"))
+  {
+    std::string msg;
+    if (!SaveCups(project_.settings().cups_file(), cups_))
+      Status("Could not write " + project_.settings().cups_file().string(), true);
+    else if (project_.ApplyCups(cups_, msg))
+    {
+      cups_dirty_ = false;
+      Status(msg + " Start the game normally (not the direct start) to choose the cup.");
+    }
+    else
+      Status(msg, true);
+  }
+  ImGui::EndDisabled();
+  ImGui::TextDisabled("Written: sys/main.dol (patched) and files/bmp_e/bmp_selgf.tpl.lz (icons) in the mod folder.");
   ImGui::End();
 }
 

@@ -82,12 +82,13 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY]:
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY]
+  // [--cups]:
   // render, save, quit (for testing and documentation).
   std::string screenshot;
   int start_course = -1, start_select = -1, start_place = -1, start_handle = -1;
   float start_lift = 0;
-  bool start_collision = false, no_textures = false;
+  bool start_collision = false, no_textures = false, show_cups = false;
   for (int i = 1; i < argc; ++i)
   {
     const std::string_view a = argv[i];
@@ -111,6 +112,8 @@ int main(int argc, char** argv)
       start_collision = true;
     else if (a == "--no-textures")
       no_textures = true;
+    else if (a == "--cups")
+      show_cups = true;
   }
   settings.Load();
   DetectDefaults(settings);
@@ -179,6 +182,8 @@ int main(int argc, char** argv)
   }
 
   editor.DebugStart(start_course, start_select, start_collision, start_place, start_handle, start_lift);
+  if (show_cups)
+    editor.ShowCups();
   int frame = 0;
   Uint64 last = SDL_GetTicksNS();
   while (!editor.WantsQuit())

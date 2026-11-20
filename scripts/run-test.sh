@@ -8,9 +8,11 @@
 #   1. Once per GLINUX version the menus are navigated automatically
 #      (Practice > Ruby Cup > Twist Road > Blue Falcon > settings dialog) and a
 #      savestate is taken right before the course is loaded.
-#   2. Every test loads that savestate, writes the course id to 0x803FFB71
-#      (the COLI_COURSExx number the game loads next) and presses OK.
-#      The course itself is then read from the edited disc folder.
+#   2. Every test loads that savestate, writes the course id to the race setup
+#      (byte 0x803FFB71 with the original main.dol: the COLI_COURSExx number the
+#      game loads next) and presses OK. The course itself is then read from the
+#      edited disc folder. The address is taken relative to the main module
+#      (po = [0x800030C8]) because the custom-cup patch moves it by a few KiB.
 set -euo pipefail
 mode="$1"; game="$2"; appimage="${3:-}"; src_user_dir="${4:-}"; runtime="${5:-}"; course="${6:-}"
 echo "[run-test] mode=$mode game=$game course=${course:-menu}"
@@ -81,6 +83,11 @@ cmd() {
     fi
 }
 press() { cmd "command=pad_frames port=0 frames=4 $1=1"; sleep "${2:-1}"; }
+# Race setup struct (module 1 BSS): po + 0x2453E0 (= 0x803FFAE0 with po 0x801BA700).
+read_setup() {
+    cmd "command=read_memory address=0x800030C8 size=4 path=po.bin"
+    setup=$(( 16#$(od -An -tx1 -N4 "$auto/po.bin" | tr -d ' \n') + 0x2453E0 ))
+}
 frames() { sed -n 's/^frame_count=//p' "$auto/status.txt" 2>/dev/null || echo 0; }
 
 "${runner[@]}" --automation-dir "$auto" &
@@ -106,7 +113,8 @@ else
     press a 3                # -> Select Machine (Blue Falcon)
     press a 2.5              # -> Machine Settings
     press a 2.5              # -> Practice dialog, cursor on OK
-    cmd "command=read_memory address=0x803FFB70 size=4 path=check.bin"
+    read_setup
+    cmd "command=read_memory address=$(printf '0x%X' $((setup + 0x90))) size=4 path=check.bin"
     if [[ "$(od -An -tx1 -j1 -N1 "$auto/check.bin" | tr -d ' ')" != 01 ]]; then
         echo "[run-test] menu navigation did not reach the course selection; staying in the menu" >&2
         wait "$pid"; exit 0
@@ -116,7 +124,8 @@ else
     echo "[run-test] savestate written: $state"
 fi
 
-cmd "command=write_memory address=0x803FFB71 data=$(printf '%02X' "$course")"
+read_setup
+cmd "command=write_memory address=$(printf '0x%X' $((setup + 0x91))) data=$(printf '%02X' "$course")"
 press a 1.5                  # OK -> loads COLI_COURSE$course from the edited disc
 press a 0.5                  # safety repeat (only skips the course intro if the first one worked)
 echo "[run-test] racing on course $course"

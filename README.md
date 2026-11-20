@@ -56,6 +56,7 @@ A step-by-step test guide is in [TESTING.md](TESTING.md).
 | `work/test-userdir/` | separate copy of the GLINUX user folder for tests (protects your saves) |
 | `work/editor.ini` | settings (ROM, AppImage, GLINUX user folder, launcher) |
 | `work/cups.ini` | custom cups (name, courses, icon colour) |
+| `work/courses.ini` | new courses (slot, name, template course) |
 | `work/launch.log` | output of the last game launch |
 
 The disc is extracted with `dolphin-tool` (Dolphin Flatpak), either in the
@@ -121,6 +122,18 @@ editor under *File → Settings* or with
   Attack, Practice, VS Battle). Start the game normally (direct start off) to
   pick them.
   Details: [docs/cup-format.md](docs/cup-format.md).
+- **New courses:** *File → New course…* creates a course in one of the game's
+  unused course slots (2, 4, 6, 12, 18, 19, 20, 23) with a name and a theme
+  (Mute City, Casino Palace, Big Blue, …). It starts as a copy of an original
+  course of that theme (pick which one), so it always has a start line, a
+  drivable track and a set of objects; the stage models, CPU line, cameras and
+  staff ghost are copied along. The name and theme are written into the
+  game's tables by the `main.dol` patch (the same one as the custom cups), so
+  the race intro and the course selection show them (e.g. "CASINO PALACE /
+  Test Run"). Put the course into a custom cup to race it from the menus, or
+  press F5. New courses are listed with "(new)", saved in `work/courses.ini`
+  and can be renamed or deleted in the same window.
+  Details: [docs/course-slots.md](docs/course-slots.md).
 - **Textures:** *View → Textures* or *File → Settings → Load textures*
   (on by default, saved in `work/editor.ini`). Without textures the models are
   drawn in their material colour, which is lighter and faster.
@@ -131,10 +144,15 @@ editor under *File → Settings* or with
 (`--automation-dir`, command files for controller input, memory and
 savestates):
 
-1. Once per GLINUX version: navigate the menus automatically (Practice →
-   Ruby Cup → Twist Road → Blue Falcon → settings dialog) and save a savestate
-   there, right before the course is loaded.
-2. On every test: load that savestate, write the course number to
+1. Once (again whenever files are added to the mod folder or `main.dol`
+   changes): navigate the menus automatically (Practice → Ruby Cup → Twist
+   Road → Blue Falcon → settings dialog) and save a savestate there, right
+   before the course is loaded. The title screen's attract demo sometimes
+   swallows the Start press, so a failed navigation is retried from a fresh
+   boot.
+2. On every test: load that savestate, replace the disc file table (FST) in
+   it with the current one (read from the fresh boot; saved courses change
+   file sizes and a stale FST makes the game crash), write the course number to
    **`0x803FFB71`** (u8, the number of the `COLI_COURSExx.lz` the game loads
    next; found by comparing RAM for the five Ruby Cup courses and cross-checked
    with course 14 → Big Blue) and press OK. The course is then loaded from the
@@ -209,6 +227,12 @@ and write to a separate file), `unlz`, `lz`.
   Practice. Not tested yet: a complete Grand Prix to the results screen, and
   VS Battle (needs two controllers).
   The glow of the selected custom cup icon uses the AX Cup colour.
+- New courses: tested in the game (direct start and Practice → custom cup →
+  course selection → race): name, theme, background and track work. The
+  course selection shows no track outline for them (the outline graphic is a
+  separate per-course resource that is not copied yet), and the difficulty
+  stars are empty. Grand Prix results, Time Attack records and the staff ghost
+  of an edited course are not tested.
 
 ## AI disclosure
 

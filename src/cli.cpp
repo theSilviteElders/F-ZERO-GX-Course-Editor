@@ -214,7 +214,13 @@ static int SelfTest(const fs::path& workspace)
       const TplFile selgf(selgf_raw);
       const auto sel = project.LoadDiscTpl("bmp_sel");
       const std::vector<CupDef> cups = {{"Self Test", {7, 13, 21, 25, 27}, 200}, {"Two", {1}, 60}};
-      const Bytes patched = PatchDol(*dol, cups, selgf.count());
+      const std::vector<CourseDef> courses = {{2, "Self Test Road", 16}, {23, "Second", 32}};
+      const Bytes patched = PatchDol(*dol, cups, selgf.count(), courses);
+      // The custom-course entries must sit inside the patch table, before its terminator.
+      const Bytes plain = PatchDol(*dol, cups, selgf.count());
+      const bool courses_ok = patched.size() >= plain.size() && ValidateCourses(courses).empty() &&
+                              ValidateCups({{"With new", {2, 1}, 0}}, courses).empty() &&
+                              !ValidateCups({{"With new", {2, 1}, 0}}).empty();
       const Texture icon = CupIcon(selgf, 200), arrow = LeftArrow(*sel);
       const TplFile out(AppendTextures(selgf_raw, {arrow, icon}));
       bool same = out.count() == selgf.count() + 2;
@@ -228,10 +234,11 @@ static int SelfTest(const fs::path& workspace)
       bool icon_ok = back && back->width == icon.width && back->height == icon.height;
       for (std::size_t i = 0; icon_ok && i < icon.rgba.size(); ++i)
         icon_ok = std::abs(int(back->rgba[i]) - int(icon.rgba[i])) <= 36;
-      ok = patched.size() > dol->size() && same && icon_ok;
+      ok = patched.size() > dol->size() && same && icon_ok && courses_ok;
       what = "dol " + std::to_string(dol->size()) + "->" + std::to_string(patched.size()) +
              " textures " + std::to_string(selgf.count()) + "->" + std::to_string(out.count()) +
-             (same ? "" : " ORIGINAL-TEXTURES-CHANGED") + (icon_ok ? "" : " ICON-MISMATCH");
+             (same ? "" : " ORIGINAL-TEXTURES-CHANGED") + (icon_ok ? "" : " ICON-MISMATCH") +
+             (courses_ok ? "" : " NEW-COURSES-FAILED");
     }
     catch (const std::exception& e)
     {
@@ -372,11 +379,32 @@ int main(int argc, char** argv)
       st.workspace = argv[2];
       Project pr(st);
       std::string msg;
-      const bool ok = pr.ApplyCups(LoadCups(st.cups_file()), msg);
+      const bool ok = pr.ApplyCups(LoadCups(st.cups_file()), msg, LoadCourses(st.courses_file()));
       std::cout << msg << "\n";
       return ok ? 0 : 1;
     }
-    std::cerr << "usage: fzgx-cli selftest <workspace> | cups <workspace> | unlz <in> <out> | lz <in> <out>\n";
+    if (cmd == "newcourse" && argc == 6)
+    {
+      // newcourse <workspace> <slot> <template> <name>: like File -> New course in the editor.
+      Settings st;
+      st.workspace = argv[2];
+      Project pr(st);
+      std::vector<CourseDef> courses = LoadCourses(st.courses_file());
+      courses.push_back({std::atoi(argv[3]), argv[5], std::atoi(argv[4])});
+      std::string msg;
+      if (const std::string problem = ValidateCourses(courses); !problem.empty())
+        msg = problem;
+      else if (pr.CreateCourse(courses.back(), msg) && SaveCourses(st.courses_file(), courses))
+      {
+        std::cout << msg << "\n";
+        const bool ok = pr.ApplyCups(LoadCups(st.cups_file()), msg, courses);
+        std::cout << msg << "\n";
+        return ok ? 0 : 1;
+      }
+      std::cout << msg << "\n";
+      return 1;
+    }
+    std::cerr << "usage: fzgx-cli selftest <workspace> | cups <workspace> | newcourse <workspace> <slot> <template> <name> | unlz <in> <out> | lz <in> <out>\n";
     return 2;
   }
   catch (const std::exception& e)

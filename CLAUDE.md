@@ -21,7 +21,8 @@ There is no unit-test framework. The test is the CLI self-test against the real 
 
 ```bash
 ./build/fzgx-cli selftest work           # all 37 courses + cup patch; expect 38 "OK", no "FAIL"
-./build/fzgx-cli cups work               # apply work/cups.ini to the mod folder
+./build/fzgx-cli cups work               # apply work/cups.ini (+ courses.ini) to the mod folder
+./build/fzgx-cli newcourse work <slot> <template> <name>  # like File > New course
 ./build/fzgx-cli dump work 1 | head      # objects of course 01
 ./build/fzgx-cli move work <course> <index> dx dy dz
 ./build/fzgx-cli unlz <in.lz> <out.bin> / lz <in.bin> <out.lz>
@@ -40,9 +41,9 @@ Two layers, split in `CMakeLists.txt`:
   - `coli.*` + `track.cpp` — `Course`: parses the decompressed `COLI_COURSExx` (placed instances, scene objects, static collision polygons + per-surface XZ grids, track spline segments/checkpoints). `track.cpp` holds spline evaluation, handle moving and `UpdateTrack()` which re-derives checkpoints, distances, track length and checkpoint grid.
   - `gma.*` / `tpl.*` — GCMF models (GX display lists) and GX texture decoding.
   - `project.*` — `Settings` (`work/editor.ini`), disc/mod paths, load/save/restore course, `ApplyCups`, launching scripts in `scripts/` (located via compile-time `FZGX_SOURCE_DIR`, so the binary must run against the source tree; a build dir configured under an old checkout path points the scripts there too — reconfigure).
-  - `cups.*` — custom Grand Prix cups (`work/cups.ini`): patches `main.dol` with the blob from `src/cup_patch_blob.hpp` and appends icon textures to `bmp_e/bmp_selgf.tpl`.
+  - `cups.*` — custom Grand Prix cups (`work/cups.ini`): patches `main.dol` with the blob from `src/cup_patch_blob.hpp` and appends icon textures to `bmp_e/bmp_selgf.tpl`. Also new courses (`work/courses.ini`): copies of a template course in free course slots; `PatchDol` appends patch-table entries for their name/venue (`docs/course-slots.md`).
 - **`tools/`** (Python, dev-only, needs `llvm-mc`): `cup_patch.s` is the PowerPC code/data injected into `main.dol` (OSLink hook + patch table applied to modules 1/10/15 after linking); `build_cup_patch.py header` regenerates `src/cup_patch_blob.hpp` — rerun after editing the assembly. Module offsets there were measured at runtime; see `docs/cup-format.md`.
-- **`fzgx-editor`** (`main.cpp`, `renderer.*`, `editor.*`): SDL/ImGui app. `Editor` (in `editor.cpp`, the bulk of the code) owns selection, gizmo, linked objects, structures, magnetism, track-spline editing and the undo stack.
+- **`fzgx-editor`** (`main.cpp`, `renderer.*`, `editor.*`, `connectors.*` = road edge detection): SDL/ImGui app. `Editor` (in `editor.cpp`, the bulk of the code) owns selection, gizmo, linked objects, structures, magnetism, track-spline editing and the undo stack.
 
 Key invariants:
 
@@ -53,7 +54,7 @@ Key invariants:
 - **Undo:** edits go through `BeginEdit` / `ApplyPrimary` / `EndEdit`, producing one `UndoEntry` (instances, polys, alive-state, curves) per user action.
 - **Cup patch:** the main game module only exists in RAM (linked from compressed data), so it is patched at link time by code in a new DOL section; addresses must be module-relative (the patch itself moves module 1 by `0xfe0`, so never hard-code `0x80xxxxxx` addresses of module 1/10 in scripts — derive them from `po = [0x800030C8]`). Hook code must not clobber live registers/`cr0` (use `cr7`, `r8`–`r12`). Sprite ids must exist in their texture bank, otherwise the game corrupts its heap.
 
-Format reverse-engineering notes: README "What is known (formats)", `docs/track-format.md` and `docs/cup-format.md` (also describes the GLINUX headless automation used to inspect RAM and take screenshots) — update these when a format detail is discovered or verified. When running GLINUX for experiments, point `--game` at a copy, never at `work/disc`.
+Format reverse-engineering notes: README "What is known (formats)", `docs/track-format.md`, `docs/cup-format.md` and `docs/course-slots.md` (also describes the GLINUX headless automation used to inspect RAM and take screenshots) — update these when a format detail is discovered or verified. When running GLINUX for experiments, point `--game` at a copy, never at `work/disc`.
 
 ## Conventions
 

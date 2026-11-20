@@ -30,6 +30,7 @@ struct Settings
   fs::path mod() const { return workspace / "mod" / "GFZE01"; }
   fs::path file() const { return workspace / "editor.ini"; }
   fs::path cups_file() const { return workspace / "cups.ini"; }
+  fs::path courses_file() const { return workspace / "courses.ini"; }
   void Load();
   void Save() const;
 };
@@ -38,6 +39,7 @@ struct CourseInfo
 {
   int id = 0;
   bool modified = false;
+  bool custom = false;  // new course in a free slot (only in the mod folder)
 };
 
 class Project
@@ -57,10 +59,17 @@ public:
 
   // Compresses, verifies and writes the course into the mod copy.
   bool SaveCourse(int id, const Course& course, std::string& message);
-  bool RestoreCourse(int id, std::string& message);
+  // template_id >= 0: a custom course, reverted to a copy of its template.
+  bool RestoreCourse(int id, std::string& message, int template_id = -1);
+  // New course: copies the template's course, stage models, CPU line, cameras
+  // and staff ghost into the slot (mod folder only).
+  bool CreateCourse(const CourseDef& course, std::string& message);
+  // Removes a custom course's files from the mod folder (disc versions of
+  // files that exist on the disc are restored).
+  bool DeleteCourse(int id, std::string& message);
   // Writes the custom cups into the mod copy (patched main.dol + cup icons in
   // bmp_e/bmp_selgf.tpl), or restores the original files when there are none.
-  bool ApplyCups(const std::vector<CupDef>& cups, std::string& message);
+  bool ApplyCups(const std::vector<CupDef>& cups, std::string& message, const std::vector<CourseDef>& courses = {});
   // Original textures the cup icons are made from (nullopt: disc not extracted).
   std::optional<TplFile> LoadDiscTpl(const std::string& name) const;
 

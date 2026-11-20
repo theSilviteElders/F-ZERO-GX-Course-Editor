@@ -136,6 +136,19 @@ std::vector<CourseInfo> Project::ListCourses() const
       out.push_back(c);
     }
   }
+  // New courses exist only in the mod folder.
+  for (const auto& e : fs::directory_iterator(settings_.mod() / "files" / "stage", ec))
+  {
+    std::smatch m;
+    const std::string name = e.path().filename().string();
+    if (std::regex_match(name, m, re) && !fs::exists(settings_.disc() / "files" / "stage" / name))
+    {
+      CourseInfo c;
+      c.id = std::stoi(m[1]);
+      c.custom = true;
+      out.push_back(c);
+    }
+  }
   std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.id < b.id; });
   return out;
 }
@@ -156,7 +169,9 @@ ModelLibrary Project::BuildModels(int id, const Course& course, std::string* ven
   ModelLibrary lib;
   char st[32];
   std::snprintf(st, sizeof st, "st%02d.gma.lz", id);
-  lib.AddArchive(settings_.disc() / "files" / "stage" / st);
+  // New courses have their stage models only in the mod folder.
+  const fs::path mod_st = settings_.mod() / "files" / "stage" / st;
+  lib.AddArchive(fs::exists(mod_st) ? mod_st : settings_.disc() / "files" / "stage" / st);
 
   std::set<std::string> wanted;
   for (const auto& in : course.instances())
@@ -266,10 +281,74 @@ bool Project::SaveCourse(int id, const Course& course, std::string& message)
   return true;
 }
 
-bool Project::RestoreCourse(int id, std::string& message)
+namespace
+{
+// Files of a course id (relative to files/), as found on the disc.
+std::vector<std::string> CourseFiles(int id)
+{
+  char b[16];
+  std::snprintf(b, sizeof b, "%02d", id);
+  const std::string n2 = b, n = std::to_string(id);
+  return {"stage/COLI_COURSE" + n2 + ".lz", "stage/st" + n2 + ".gma.lz",      "stage/st" + n2 + ".tpl.lz",
+          "stage/selst" + n2 + ".gma.lz",   "stage/selst" + n2 + ".tpl.lz",   "enemy_line/line" + n2 + ".bin",
+          "cam/livecam_" + n + ".bin",      "cam/livecam_ball_" + n + ".bin", "cam/livecam_stage_" + n + ".bin",
+          "cam/livecam_stage_demo_" + n + ".bin", "staff_ghost/ghost" + n + ".dat"};
+}
+}  // namespace
+
+bool Project::CreateCourse(const CourseDef& course, std::string& message)
+{
+  if (!EnsureMod(message))
+    return false;
+  const fs::path disc = settings_.disc() / "files", mod = settings_.mod() / "files";
+  if (fs::exists(mod / "stage" / CourseFile(course.id)) && !fs::exists(disc / "stage" / CourseFile(course.id)))
+  {
+    message = "Slot " + std::to_string(course.id) + " is already used by a new course.";
+    return false;
+  }
+  const auto from = CourseFiles(course.template_id), to = CourseFiles(course.id);
+  int copied = 0;
+  for (std::size_t i = 0; i < from.size(); ++i)
+  {
+    auto data = ReadFile(disc / from[i]);
+    if (!data)
+      continue;  // not every course has every file (e.g. no demo camera)
+    if (!WriteFileAtomic(mod / to[i], *data))
+    {
+      message = "Write failed: " + (mod / to[i]).string();
+      return false;
+    }
+    ++copied;
+  }
+  if (!fs::exists(mod / to[0]))
+  {
+    message = "Template course " + std::to_string(course.template_id) + " not found on the disc.";
+    return false;
+  }
+  message = "Course \"" + course.name + "\" created in slot " + std::to_string(course.id) + " (" +
+            std::to_string(copied) + " files copied from course " + std::to_string(course.template_id) + ").";
+  return true;
+}
+
+bool Project::DeleteCourse(int id, std::string& message)
+{
+  const fs::path disc = settings_.disc() / "files", mod = settings_.mod() / "files";
+  std::error_code ec;
+  for (const auto& f : CourseFiles(id))
+  {
+    if (auto orig = ReadFile(disc / f))
+      WriteFileAtomic(mod / f, *orig);
+    else
+      fs::remove(mod / f, ec);
+  }
+  message = "Course in slot " + std::to_string(id) + " deleted from the mod folder.";
+  return true;
+}
+
+bool Project::RestoreCourse(int id, std::string& message, int template_id)
 {
   const fs::path out = settings_.mod() / "files" / "stage" / CourseFile(id);
-  auto orig = ReadFile(settings_.disc() / "files" / "stage" / CourseFile(id));
+  auto orig = ReadFile(settings_.disc() / "files" / "stage" / CourseFile(template_id >= 0 ? template_id : id));
   if (!orig || !fs::exists(settings_.mod()))
   {
     message = "Nothing to revert.";
@@ -299,11 +378,16 @@ std::optional<TplFile> Project::LoadDiscTpl(const std::string& name) const
   }
 }
 
-bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message)
+bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message, const std::vector<CourseDef>& courses)
 {
   if (!EnsureMod(message))
     return false;
-  if (const std::string problem = ValidateCups(cups); !problem.empty())
+  if (const std::string problem = ValidateCourses(courses); !problem.empty())
+  {
+    message = problem;
+    return false;
+  }
+  if (const std::string problem = ValidateCups(cups, courses); !problem.empty())
   {
     message = problem;
     return false;
@@ -320,8 +404,10 @@ bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message)
   try
   {
     Bytes new_dol = *dol, new_tpl = *tpl;
-    if (!cups.empty())
+    if (!cups.empty() || !courses.empty())
     {
+      // New courses need the patch too (names, venues); the page arrow texture is
+      // always appended so that every sprite id the patch knows exists.
       const Bytes selgf_raw = LzDecompress(*tpl);
       const TplFile selgf(selgf_raw);
       auto sel = LoadDiscTpl("bmp_sel");
@@ -329,7 +415,7 @@ bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message)
       std::vector<Texture> icons = {LeftArrow(*sel)};
       for (const auto& c : cups)
         icons.push_back(CupIcon(selgf, c.hue));
-      new_dol = PatchDol(*dol, cups, selgf.count());
+      new_dol = PatchDol(*dol, cups, selgf.count(), courses);
       const Bytes raw = AppendTextures(selgf_raw, icons);
       new_tpl = LzCompress(raw);
       Check(LzDecompress(new_tpl) == raw, "compression was not lossless");
@@ -345,8 +431,10 @@ bool Project::ApplyCups(const std::vector<CupDef>& cups, std::string& message)
     message = std::string("Cups not written: ") + e.what();
     return false;
   }
-  message = cups.empty() ? "No custom cups: original main.dol and cup icons restored."
-                         : std::to_string(cups.size()) + " custom cup(s) written to the mod folder.";
+  message = cups.empty() && courses.empty()
+                ? "No custom cups or courses: original main.dol and cup icons restored."
+                : std::to_string(cups.size()) + " custom cup(s) and " + std::to_string(courses.size()) +
+                      " new course(s) written to the mod folder.";
   return true;
 }
 
@@ -377,15 +465,12 @@ bool Project::ExtractDisc(std::string& message)
 
 std::string VenueName(const std::string& fn)
 {
-  static const std::map<std::string, std::string> names = {
-      {"mut", "Mute City"},  {"big", "Big Blue"},   {"cas", "Casino Palace"},
-      {"fir", "Fire Field"}, {"por", "Port Town"},  {"san", "Sand Ocean"},
-      {"lig", "Lightning"},
-  };
   if (fn.size() < 6)
     return fn;
   const std::string tag = fn.substr(3, 3);
-  auto it = names.find(tag);
-  return it != names.end() ? it->second : "bg_" + tag;
+  for (const auto& t : Themes())
+    if (tag == t.tag)
+      return t.name;
+  return "bg_" + tag;
 }
 }  // namespace fzgx

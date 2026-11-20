@@ -143,6 +143,7 @@ bool Editor::Init()
     return false;
   RefreshCourses();
   cups_ = LoadCups(project_.settings().cups_file());
+  custom_courses_ = LoadCourses(project_.settings().courses_file());
   if (!project_.DiscReady())
   {
     show_settings_ = true;
@@ -1534,6 +1535,7 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
   DrawStatus(0, H - kStatusHeight, W);
   DrawSettings();
   DrawCups();
+  DrawNewCourse();
   DrawPopups();
 
   HandleViewportInput(vx, vy, vw, vh, dt);
@@ -2102,7 +2104,8 @@ void Editor::DrawMenu()
     if (ImGui::MenuItem("Revert course to original", nullptr, false, course_.has_value()))
     {
       std::string msg;
-      const bool ok = project_.RestoreCourse(course_id_, msg);
+      const CourseDef* custom = CustomCourse(course_id_);
+      const bool ok = project_.RestoreCourse(course_id_, msg, custom ? custom->template_id : -1);
       Status(msg, !ok);
       RefreshCourses();
       OpenCourse(course_id_);
@@ -2111,6 +2114,8 @@ void Editor::DrawMenu()
       show_settings_ = true;
     if (ImGui::MenuItem("Cups…"))
       show_cups_ = true;
+    if (ImGui::MenuItem("New course…"))
+      show_new_course_ = true;
     ImGui::Separator();
     if (ImGui::MenuItem("Quit"))
       RequestQuit();
@@ -2199,8 +2204,9 @@ void Editor::DrawCoursePanel(float x, float y, float w, float h)
     for (const auto& c : courses_)
     {
       char label[96];
-      std::snprintf(label, sizeof label, "%s %02d  %s##course%d", c.modified ? "*" : " ", c.id,
-                    *CourseName(c.id) ? CourseName(c.id) : "(special)", c.id);
+      const std::string title = CourseLabel(c.id, custom_courses_);
+      std::snprintf(label, sizeof label, "%s %02d  %s%s##course%d", c.modified ? "*" : " ", c.id,
+                    title.empty() ? "(special)" : title.c_str(), c.custom ? " (new)" : "", c.id);
       if (ImGui::Selectable(label, c.id == course_id_) && c.id != course_id_)
       {
         if (dirty_)
@@ -2728,7 +2734,7 @@ void Editor::DrawSettings()
 bool Editor::ApplyCups()
 {
   std::string msg;
-  const bool ok = project_.ApplyCups(cups_, msg);
+  const bool ok = project_.ApplyCups(cups_, msg, custom_courses_);
   if (!ok)
     Status(msg, true);
   return ok;
@@ -2769,9 +2775,9 @@ void Editor::DrawCups()
     ImGui::End();
     return;
   }
-  auto course_label = [](int id) {
+  auto course_label = [&](int id) {
     char buf[64];
-    std::snprintf(buf, sizeof buf, "%02d  %s", id, CourseName(id));
+    std::snprintf(buf, sizeof buf, "%02d  %s", id, CourseLabel(id, custom_courses_).c_str());
     return std::string(buf);
   };
 
@@ -2798,7 +2804,7 @@ void Editor::DrawCups()
                      kMaxCustomCups, kMaxCupCourses);
   std::vector<int> race_courses;
   for (const auto& c : courses_)
-    if (*CourseName(c.id))
+    if (!CourseLabel(c.id, custom_courses_).empty())
       race_courses.push_back(c.id);
 
   int remove_cup = -1;
@@ -2854,7 +2860,7 @@ void Editor::DrawCups()
     ImGui::BeginDisabled(int(cup.courses.size()) >= kMaxCupCourses || race_courses.empty());
     if (ImGui::Button("Add course"))
     {
-      cup.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+      cup.courses.push_back(course_id_ > 0 && !CourseLabel(course_id_, custom_courses_).empty() ? course_id_ : race_courses.front());
       cups_dirty_ = true;
     }
     ImGui::EndDisabled();
@@ -2878,13 +2884,13 @@ void Editor::DrawCups()
     CupDef c;
     c.name = "Custom Cup " + std::to_string(cups_.size() + 1);
     c.hue = cups_.empty() ? 30.0f : 200.0f;
-    c.courses.push_back(course_id_ > 0 && *CourseName(course_id_) ? course_id_ : race_courses.front());
+    c.courses.push_back(course_id_ > 0 && !CourseLabel(course_id_, custom_courses_).empty() ? course_id_ : race_courses.front());
     cups_.push_back(c);
     cups_dirty_ = true;
   }
   ImGui::EndDisabled();
 
-  const std::string problem = ValidateCups(cups_);
+  const std::string problem = ValidateCups(cups_, custom_courses_);
   if (!problem.empty())
     ImGui::TextColored({1, 0.4f, 0.4f, 1}, "%s", problem.c_str());
   ImGui::BeginDisabled(!problem.empty());
@@ -2893,7 +2899,7 @@ void Editor::DrawCups()
     std::string msg;
     if (!SaveCups(project_.settings().cups_file(), cups_))
       Status("Could not write " + project_.settings().cups_file().string(), true);
-    else if (project_.ApplyCups(cups_, msg))
+    else if (project_.ApplyCups(cups_, msg, custom_courses_))
     {
       cups_dirty_ = false;
       Status(msg + " Start the game normally (not the direct start) to choose the cup.");
@@ -2904,6 +2910,179 @@ void Editor::DrawCups()
   ImGui::EndDisabled();
   ImGui::TextDisabled("Written: sys/main.dol (patched) and files/bmp_e/bmp_selgf.tpl.lz (icons) in the mod folder.");
   ImGui::End();
+}
+
+const CourseDef* Editor::CustomCourse(int id) const
+{
+  for (const auto& c : custom_courses_)
+    if (c.id == id)
+      return &c;
+  return nullptr;
+}
+
+void Editor::DrawNewCourse()
+{
+  if (!show_new_course_)
+    return;
+  ImGui::SetNextWindowSize({560, 0}, ImGuiCond_Appearing);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+  if (!ImGui::Begin("New course", &show_new_course_))
+  {
+    ImGui::End();
+    return;
+  }
+  const auto& themes = Themes();
+  std::vector<int> free;
+  for (int id : FreeCourseSlots())
+    if (!CustomCourse(id))
+      free.push_back(id);
+  if (std::find(free.begin(), free.end(), new_course_slot_) == free.end())
+    new_course_slot_ = free.empty() ? -1 : free.front();
+  if (ThemeOfCourse(new_course_template_) != new_course_theme_)
+    new_course_template_ = themes[new_course_theme_].courses.front();
+
+  ImGui::TextWrapped("A new course starts as a copy of an original course of the chosen theme: its track, "
+                     "start line, objects, stage models, CPU line and cameras. It goes into one of the game's "
+                     "unused course slots and is then edited like any other course. Add it to a custom cup "
+                     "(File > Cups…) to race it from the menus; F5 starts it directly.");
+  ImGui::SeparatorText("Create");
+  ImGui::SetNextItemWidth(260);
+  ImGui::InputText("Name", &new_course_name_);
+  ImGui::SetNextItemWidth(260);
+  if (ImGui::BeginCombo("Theme", themes[new_course_theme_].name))
+  {
+    for (int i = 0; i < int(themes.size()); ++i)
+      if (ImGui::Selectable(themes[i].name, i == new_course_theme_))
+        new_course_theme_ = i;
+    ImGui::EndCombo();
+  }
+  ImGui::SetNextItemWidth(260);
+  if (ImGui::BeginCombo("Start from", CourseName(new_course_template_)))
+  {
+    for (int id : themes[new_course_theme_].courses)
+      if (ImGui::Selectable(CourseName(id), id == new_course_template_))
+        new_course_template_ = id;
+    ImGui::EndCombo();
+  }
+  ImGui::SetNextItemWidth(260);
+  const std::string slot_label = new_course_slot_ < 0 ? "(all used)" : std::to_string(new_course_slot_);
+  if (ImGui::BeginCombo("Course slot", slot_label.c_str()))
+  {
+    for (int id : free)
+      if (ImGui::Selectable(std::to_string(id).c_str(), id == new_course_slot_))
+        new_course_slot_ = id;
+    ImGui::EndCombo();
+  }
+  ImGui::SetItemTooltip("COLI_COURSExx number of the new course (an id the game does not use).");
+
+  CourseDef def{new_course_slot_, new_course_name_, new_course_template_};
+  std::vector<CourseDef> next = custom_courses_;
+  next.push_back(def);
+  const std::string problem = new_course_slot_ < 0 ? "All free course slots are used." : ValidateCourses(next);
+  if (!problem.empty())
+    ImGui::TextColored({1, 0.4f, 0.4f, 1}, "%s", problem.c_str());
+  ImGui::BeginDisabled(!problem.empty());
+  if (ImGui::Button("Create course", {200, 0}))
+  {
+    std::string msg;
+    if (dirty_ && !Save())
+      ;
+    else if (!project_.CreateCourse(def, msg))
+      Status(msg, true);
+    else
+    {
+      custom_courses_ = next;
+      SaveCourses(project_.settings().courses_file(), custom_courses_);
+      std::string cups_msg;
+      const bool ok = project_.ApplyCups(cups_, cups_msg, custom_courses_);
+      RefreshCourses();
+      OpenCourse(def.id);
+      Status(ok ? msg + " Name and theme are written into main.dol." : msg + " " + cups_msg, !ok);
+    }
+  }
+  ImGui::EndDisabled();
+
+  ImGui::SeparatorText("New courses");
+  if (custom_courses_.empty())
+    ImGui::TextDisabled("None yet.");
+  int rename_changed = -1;
+  for (int i = 0; i < int(custom_courses_.size()); ++i)
+  {
+    CourseDef& c = custom_courses_[i];
+    ImGui::PushID(i);
+    ImGui::Text("%02d", c.id);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("##name", &c.name);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+      rename_changed = i;
+    ImGui::SameLine();
+    const int theme = ThemeOfCourse(c.template_id);
+    ImGui::TextDisabled("%s, from %s", theme >= 0 ? Themes()[theme].name : "?", CourseName(c.template_id));
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 120);
+    if (ImGui::SmallButton("Open"))
+    {
+      if (dirty_)
+        pending_course_ = c.id;
+      else
+        OpenCourse(c.id);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Delete"))
+      delete_course_ = c.id;
+    ImGui::PopID();
+  }
+  if (rename_changed >= 0)
+  {
+    std::string msg;
+    if (const std::string problem2 = ValidateCourses(custom_courses_); !problem2.empty())
+      Status(problem2, true);
+    else
+    {
+      SaveCourses(project_.settings().courses_file(), custom_courses_);
+      const bool ok = project_.ApplyCups(cups_, msg, custom_courses_);
+      Status(ok ? "Course renamed (main.dol updated)." : msg, !ok);
+    }
+  }
+  ImGui::End();
+
+  if (delete_course_ >= 0)
+    ImGui::OpenPopup("Delete course?");
+  if (ImGui::BeginPopupModal("Delete course?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    const CourseDef* c = CustomCourse(delete_course_);
+    ImGui::Text("Delete \"%s\" (slot %02d) and all its edits?", c ? c->name.c_str() : "?", delete_course_);
+    ImGui::TextDisabled("It is also removed from custom cups.");
+    if (ImGui::Button("Delete"))
+    {
+      const int id = delete_course_;
+      if (course_id_ == id)
+        CloseCourse();
+      std::string msg;
+      project_.DeleteCourse(id, msg);
+      std::erase_if(custom_courses_, [&](const CourseDef& d) { return d.id == id; });
+      SaveCourses(project_.settings().courses_file(), custom_courses_);
+      for (auto& cup : cups_)
+        std::erase(cup.courses, id);
+      std::erase_if(cups_, [](const CupDef& cup) { return cup.courses.empty(); });
+      SaveCups(project_.settings().cups_file(), cups_);
+      std::string cups_msg;
+      project_.ApplyCups(cups_, cups_msg, custom_courses_);
+      RefreshCourses();
+      if (!course_ && !courses_.empty())
+        OpenCourse(courses_.front().id);
+      Status(msg);
+      delete_course_ = -1;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+    {
+      delete_course_ = -1;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
 }
 
 void Editor::DrawPopups()

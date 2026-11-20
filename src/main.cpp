@@ -90,7 +90,7 @@ int main(int argc, char** argv)
   float start_lift = 0, start_scale = 0, start_connect = -1000;
   float start_box[4] = {0, 0, 0, 0}, start_move[3] = {0, 0, 0};
   bool use_box = false;
-  bool start_collision = false, no_textures = false, show_cups = false;
+  bool start_collision = false, no_textures = false, show_cups = false, show_new_course = false;
   for (int i = 1; i < argc; ++i)
   {
     const std::string_view a = argv[i];
@@ -132,6 +132,8 @@ int main(int argc, char** argv)
       no_textures = true;
     else if (a == "--cups")
       show_cups = true;
+    else if (a == "--new-course")
+      show_new_course = true;
   }
   settings.Load();
   DetectDefaults(settings);
@@ -209,6 +211,8 @@ int main(int argc, char** argv)
                     {start_move[0], start_move[1], start_move[2]});
   if (show_cups)
     editor.ShowCups();
+  if (show_new_course)
+    editor.ShowNewCourse();
   int frame = 0;
   Uint64 last = SDL_GetTicksNS();
   while (!editor.WantsQuit())

@@ -90,6 +90,7 @@ public:
   void RequestQuit();
   void DebugStart(int course, int select, bool collision, int place = -1, int handle = -1, float lift = 0);
   void ShowCups() { show_cups_ = true; }
+  void ShowNewCourse() { show_new_course_ = true; }
   // Scales the selection like the inspector does and prints the model centres (testing).
   void DebugScale(float factor);
   // Duplicates the selection, turns the copy by `yaw` degrees and connects it (testing).
@@ -200,6 +201,9 @@ private:
   void DrawInspector(float x, float y, float w, float h);
   void DrawSettings();
   void DrawCups();
+  void DrawNewCourse();
+  // Writes main.dol etc. for cups + new courses; false + status on error.
+  const CourseDef* CustomCourse(int id) const;
   void DrawPopups();
   // Writes the custom cups into the mod folder (false + status on error).
   bool ApplyCups();
@@ -301,6 +305,13 @@ private:
   bool show_edges_ = true;
   // Placed object -> the objects and polygons placed together with it.
   std::map<int, std::pair<std::vector<int>, std::vector<int>>> spawn_groups_;
+
+  // New courses in free slots (work/courses.ini)
+  std::vector<CourseDef> custom_courses_;
+  bool show_new_course_ = false;
+  std::string new_course_name_ = "New Course";
+  int new_course_theme_ = 0, new_course_template_ = 1, new_course_slot_ = -1;
+  int delete_course_ = -1;  // asks for confirmation
 
   // Custom cups (work/cups.ini)
   std::vector<CupDef> cups_;

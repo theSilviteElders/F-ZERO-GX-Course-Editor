@@ -50,6 +50,109 @@ std::vector<std::string> CupsOfCourse(int id, const std::vector<CupDef>& custom)
   return out;
 }
 
+// --- custom courses ----------------------------------------------------------------
+const std::vector<int>& FreeCourseSlots()
+{
+  // Ids 22 and 30 have no venue (0xff) and are left out.
+  static const std::vector<int> slots = {2, 4, 6, 12, 18, 19, 20, 23};
+  return slots;
+}
+
+const std::vector<Theme>& Themes()
+{
+  // Values of the module 1 byte tables course id -> venue code (0x8031e18c) and
+  // course id -> venue index (0x80352dd4; index into the venue name table),
+  // addresses with the original main.dol.
+  static const std::vector<Theme> themes = {
+      {"Mute City", "mut", 25, 1, {1, 3, 36}},      {"Casino Palace", "cas", 4, 13, {16, 29}},
+      {"Sand Ocean", "san", 41, 8, {26, 25}},       {"Lightning", "lig", 20, 6, {8, 9, 34}},
+      {"Aeropolis", "tow", 50, 15, {5, 21, 31}},    {"Port Town", "por", 33, 2, {7, 13, 33}},
+      {"Green Plant", "for", 13, 10, {10, 11, 35}}, {"Big Blue", "big", 27, 4, {14, 27}},
+      {"Fire Field", "fir", 11, 11, {15, 17}},      {"Cosmo Terminal", "ele", 9, 16, {24}},
+      {"Phantom Road", "rai", 35, 19, {28}},        {"Outer Space", "met", 22, 14, {32}},
+  };
+  return themes;
+}
+
+int ThemeOfCourse(int id)
+{
+  const auto& t = Themes();
+  for (int i = 0; i < int(t.size()); ++i)
+    if (std::find(t[i].courses.begin(), t[i].courses.end(), id) != t[i].courses.end())
+      return i;
+  return -1;
+}
+
+std::vector<CourseDef> LoadCourses(const std::filesystem::path& file)
+{
+  std::vector<CourseDef> out;
+  std::ifstream in(file);
+  std::string line;
+  while (std::getline(in, line))
+  {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    if (line == "[course]")
+    {
+      out.emplace_back();
+      continue;
+    }
+    const auto eq = line.find('=');
+    if (out.empty() || eq == std::string::npos || line[0] == '#')
+      continue;
+    const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+    if (key == "id")
+      out.back().id = std::atoi(value.c_str());
+    else if (key == "name")
+      out.back().name = value;
+    else if (key == "template")
+      out.back().template_id = std::atoi(value.c_str());
+  }
+  return out;
+}
+
+bool SaveCourses(const std::filesystem::path& file, const std::vector<CourseDef>& courses)
+{
+  std::ofstream out(file);
+  out << "# Custom courses (F-Zero GX Course Editor)\n";
+  for (const auto& c : courses)
+    out << "\n[course]\nid=" << c.id << "\nname=" << c.name << "\ntemplate=" << c.template_id << "\n";
+  return bool(out);
+}
+
+std::string ValidateCourses(const std::vector<CourseDef>& courses)
+{
+  if (courses.size() > std::size_t(kMaxCustomCourses))
+    return "At most " + std::to_string(kMaxCustomCourses) + " new courses are possible.";
+  std::vector<int> seen;
+  for (const auto& c : courses)
+  {
+    const std::string who = c.name.empty() ? "A course" : "Course \"" + c.name + "\"";
+    const auto& free = FreeCourseSlots();
+    if (std::find(free.begin(), free.end(), c.id) == free.end())
+      return who + ": slot " + std::to_string(c.id) + " is not a free course slot.";
+    if (std::find(seen.begin(), seen.end(), c.id) != seen.end())
+      return who + ": slot " + std::to_string(c.id) + " is used twice.";
+    seen.push_back(c.id);
+    if (c.name.empty() || c.name.size() > 24)
+      return who + ": the name must have 1 to 24 characters.";
+    for (const unsigned char ch : c.name)
+      if (ch < 0x20 || ch > 0x7e)
+        return who + ": only plain ASCII letters, digits and punctuation can be shown by the game.";
+    if (ThemeOfCourse(c.template_id) < 0)
+      return who + ": template " + std::to_string(c.template_id) + " is not a race course.";
+  }
+  return {};
+}
+
+std::string CourseLabel(int id, const std::vector<CourseDef>& custom)
+{
+  for (const auto& c : custom)
+    if (c.id == id)
+      return c.name;
+  return CourseName(id);
+}
+
 // --- cups.ini --------------------------------------------------------------------
 std::vector<CupDef> LoadCups(const std::filesystem::path& file)
 {
@@ -102,7 +205,7 @@ bool SaveCups(const std::filesystem::path& file, const std::vector<CupDef>& cups
   return bool(out);
 }
 
-std::string ValidateCups(const std::vector<CupDef>& cups)
+std::string ValidateCups(const std::vector<CupDef>& cups, const std::vector<CourseDef>& courses)
 {
   if (cups.size() > kMaxCustomCups)
     return "At most " + std::to_string(kMaxCustomCups) + " custom cups are possible.";
@@ -117,14 +220,26 @@ std::string ValidateCups(const std::vector<CupDef>& cups)
     if (c.courses.empty() || c.courses.size() > kMaxCupCourses)
       return who + ": needs 1 to " + std::to_string(kMaxCupCourses) + " courses.";
     for (const int id : c.courses)
-      if (!*CourseName(id))
+      if (!*CourseName(id) &&
+          std::none_of(courses.begin(), courses.end(), [&](const CourseDef& d) { return d.id == id; }))
         return who + ": course " + std::to_string(id) + " is not a race course.";
   }
   return {};
 }
 
 // --- main.dol --------------------------------------------------------------------
-Bytes PatchDol(const Bytes& original, const std::vector<CupDef>& cups, int icon_base)
+namespace
+{
+// Module 1 section offsets of per-course tables (measured with GLINUX, see
+// docs/course-slots.md), indexed by course id:
+constexpr std::uint32_t kM1VenueCodes = 0x8031E18C - 0x80319E10;    // section 4: u8 venue code
+constexpr std::uint32_t kM1VenueIndex = 0x80352DD4 - 0x80327D00;    // section 5: u8 venue index
+constexpr std::uint32_t kM1CourseNames = 0x80352FB8 - 0x80327D00;   // section 5: name pointer
+constexpr std::uint32_t kM1CourseTexts = 0x80353A50 - 0x80327D00;   // section 5: 6 name pointers (JP EN DE FR ES IT)
+}  // namespace
+
+Bytes PatchDol(const Bytes& original, const std::vector<CupDef>& cups, int icon_base,
+               const std::vector<CourseDef>& courses)
 {
   namespace cp = cup_patch;
   Check(original.size() >= 0x100, "main.dol: too small");
@@ -176,6 +291,53 @@ Bytes PatchDol(const Bytes& original, const std::vector<CupDef>& cups, int icon_
     std::copy(u.begin(), u.end(), blob.begin() + at(cp::kCfgNamesUc) + 32 * i);
   }
   PutU32(blob, at(cp::kCfgArrows), 0xA100u + std::uint32_t(icon_base));  // left arrow (page 2)
+
+  // Custom courses: extra "copy" entries (kind 1) into module 1 for the two
+  // venue bytes and the name pointers, written over the table's terminator;
+  // their data (venue bytes, pointers, names) follows the new terminator.
+  if (!courses.empty())
+  {
+    std::size_t end = U32(blob, 12);  // header: patches - BASE
+    while (end + 16 <= blob.size() && blob[end] != 0)
+      end += 16;
+    Check(end + 16 <= blob.size(), "cup patch: patch table not terminated");
+    blob.resize(end);
+    constexpr std::size_t kEntries = 4;  // per course
+    const std::size_t n = std::min(courses.size(), std::size_t(kMaxCustomCourses));
+    const std::size_t data = end + 16 * (kEntries * n + 1);
+    // Per course: 2 venue bytes (padded to 4), 6 name pointers, 32-byte name.
+    const std::size_t rec = 4 + 24 + 32;
+    blob.resize(data + rec * n, 0);
+    auto entry = [&](std::size_t o, std::uint8_t section, std::uint32_t offset, std::size_t src, std::uint32_t len) {
+      blob[o] = 1;
+      blob[o + 1] = 1;  // module 1
+      blob[o + 2] = section;
+      blob[o + 3] = 0;
+      PutU32(blob, o + 4, offset);
+      PutU32(blob, o + 8, cp::kBase + std::uint32_t(src));
+      PutU32(blob, o + 12, len);
+    };
+    for (std::size_t i = 0; i < n; ++i)
+    {
+      const CourseDef& c = courses[i];
+      const int theme = ThemeOfCourse(c.template_id);
+      Check(theme >= 0 && c.id > 0 && c.id < 64, "custom course: bad slot or template");
+      const std::size_t r = data + rec * i, ptrs = r + 4, name = r + 28;
+      blob[r] = Themes()[std::size_t(theme)].code;
+      blob[r + 1] = Themes()[std::size_t(theme)].venue;
+      const std::string text = c.name.substr(0, 31);
+      std::copy(text.begin(), text.end(), blob.begin() + std::ptrdiff_t(name));
+      for (int k = 0; k < 6; ++k)
+        PutU32(blob, ptrs + 4 * std::size_t(k), cp::kBase + std::uint32_t(name));
+      const std::uint32_t id = std::uint32_t(c.id);
+      const std::size_t e = end + 16 * kEntries * i;
+      entry(e, 4, kM1VenueCodes + id, r, 1);
+      entry(e + 16, 5, kM1VenueIndex + id, r + 1, 1);
+      entry(e + 32, 5, kM1CourseNames + 4 * id, ptrs, 4);
+      entry(e + 48, 5, kM1CourseTexts + 24 * id, ptrs, 24);
+    }
+    // blob[end + 16 * kEntries * n .. data) stays zero: the terminator.
+  }
   Check(blob.size() <= cp::kReserved, "cup patch: too large");
 
   int slot = -1;

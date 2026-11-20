@@ -148,6 +148,7 @@ saving restores the original files.
 | Look around and fly | hold right mouse button + WASD, Q/E down/up |
 | Flying speed | mouse wheel while holding the right mouse button, Shift faster |
 | Select | left click in the 3D view or in the list |
+| Select several (Blender-like) | Shift+click adds/removes (also in the list), drag a rectangle in the 3D view to box-select (Shift adds, Ctrl removes); works for track points too |
 | Focus selection | `F` or double-click in the list |
 | Move / rotate / scale | `W` / `E` / `R` |
 | Undo / redo | Ctrl+Z / Ctrl+Y |

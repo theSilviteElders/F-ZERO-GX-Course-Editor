@@ -69,6 +69,12 @@ editor under *File → Settings* or with
   mouse wheel moves forward/back, middle mouse button pans.
 - **Selection:** left click in the 3D view or in the object list
   (double click focuses), `F` focuses, `Esc` clears the selection.
+- **Multi-selection (Blender-like):** Shift+click adds or removes an object
+  (also in the object list), dragging a rectangle in the 3D view box-selects
+  (Shift adds, Ctrl removes). The last clicked object is the active one; moving,
+  rotating or scaling it applies to all selected objects (scaling keeps each in
+  place), Ctrl+D duplicates and Del deletes all of them. In track mode the same
+  works for track points, which then move together.
 - **Gizmo:** `W` move, `E` rotate, `R` scale; optional snapping. The gizmo sits
   at the model centre; scaling keeps the object (and its linked objects) in place.
   Values can also be typed into the inspector on the right.

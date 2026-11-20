@@ -94,6 +94,13 @@ public:
   void DebugScale(float factor);
   // Duplicates the selection, turns the copy by `yaw` degrees and connects it (testing).
   void DebugConnect(float yaw);
+  // Box-selects the screen rectangle on the next frame and moves the selection by `move` (testing).
+  void DebugBox(const glm::vec4& rect, const glm::vec3& move)
+  {
+    debug_box_ = rect;
+    debug_move_ = move;
+    debug_box_pending_ = true;
+  }
 
 private:
   // Course handling
@@ -131,6 +138,17 @@ private:
   void Redo();
   bool Modified(int i) const;
   bool Alive(int i) const { return !course_->instances()[i].removed; }
+
+  // Selection (Blender-like): selected_ is the active object, extra_selected_
+  // the other selected ones. Shift+click toggles, dragging a rectangle selects
+  // (Shift adds, Ctrl removes). Edits of the active object apply to all.
+  std::vector<int> Selection() const;
+  bool IsSelected(int i) const;
+  void Select(int i);         // only this object (-1: nothing)
+  void ToggleSelect(int i);   // add/remove, the added one becomes active
+  void BoxSelect(const glm::vec2& a, const glm::vec2& b, int mode);  // mode 0 replace, 1 add, 2 remove
+  // Track points: handle_ is the active one, extra_handles_ the others.
+  std::vector<int> SelectedHandles() const;
 
   // Track spline editing
   void RefreshHandles();
@@ -214,6 +232,16 @@ private:
 
   std::vector<UndoEntry> undo_, redo_;
   int selected_ = -1;
+  std::vector<int> extra_selected_;
+  std::vector<TrackHandle> extra_handles_;
+  // Rectangle selection in the 3D view (screen coordinates).
+  bool box_pending_ = false;
+  bool debug_box_pending_ = false;
+  glm::vec4 debug_box_{0};
+  glm::vec3 debug_move_{0};
+  glm::vec2 box_start_{0};
+  float vp_rect_[4] = {0, 0, 1, 1};  // viewport x, y, w, h of the last frame
+  std::map<int, Curves> handle_bases_;  // segment -> curves at the start of a track point drag
   std::string filter_;
   bool scroll_to_selection_ = false;
 

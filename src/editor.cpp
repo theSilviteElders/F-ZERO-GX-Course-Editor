@@ -409,15 +409,140 @@ void Editor::SetPoly(int p, const std::vector<Vec3>& v)
   dirty_ = true;
 }
 
+std::vector<int> Editor::Selection() const
+{
+  std::vector<int> out;
+  if (!course_ || selected_ < 0)
+    return out;
+  out.push_back(selected_);
+  for (int i : extra_selected_)
+    if (i != selected_ && i >= 0 && i < int(course_->instances().size()) && Alive(i) &&
+        std::find(out.begin(), out.end(), i) == out.end())
+      out.push_back(i);
+  return out;
+}
+
+bool Editor::IsSelected(int i) const
+{
+  return i >= 0 && (i == selected_ || (selected_ >= 0 && std::find(extra_selected_.begin(), extra_selected_.end(), i) != extra_selected_.end()));
+}
+
+void Editor::Select(int i)
+{
+  selected_ = i;
+  extra_selected_.clear();
+}
+
+void Editor::ToggleSelect(int i)
+{
+  if (i < 0)
+    return;
+  if (IsSelected(i))
+  {
+    std::vector<int> rest = Selection();
+    rest.erase(std::find(rest.begin(), rest.end(), i));
+    selected_ = rest.empty() ? -1 : rest.front();
+    extra_selected_.assign(rest.begin() + (rest.empty() ? 0 : 1), rest.end());
+    return;
+  }
+  if (selected_ >= 0)
+    extra_selected_.push_back(selected_);
+  selected_ = i;
+}
+
+std::vector<int> Editor::SelectedHandles() const
+{
+  std::vector<int> out;
+  if (handle_ < 0 || handle_ >= int(handles_.size()))
+    return out;
+  out.push_back(handle_);
+  for (const auto& h : extra_handles_)
+    for (int i = 0; i < int(handles_.size()); ++i)
+      if (handles_[i].segment == h.segment && std::fabs(handles_[i].time - h.time) < 1e-4f &&
+          std::find(out.begin(), out.end(), i) == out.end())
+        out.push_back(i);
+  return out;
+}
+
+void Editor::BoxSelect(const glm::vec2& a, const glm::vec2& b, int mode)
+{
+  const glm::vec2 lo = glm::min(a, b), hi = glm::max(a, b);
+  const glm::mat4 vp = proj_ * view_;
+  auto inside = [&](const glm::vec3& p) {
+    const glm::vec4 c = vp * glm::vec4(p, 1);
+    if (c.w <= 0)
+      return false;
+    const glm::vec2 s(vp_rect_[0] + (c.x / c.w * 0.5f + 0.5f) * vp_rect_[2],
+                      vp_rect_[1] + (0.5f - c.y / c.w * 0.5f) * vp_rect_[3]);
+    return glm::all(glm::greaterThanEqual(s, lo)) && glm::all(glm::lessThanEqual(s, hi));
+  };
+  if (track_mode_)
+  {
+    std::vector<int> sel = mode == 0 ? std::vector<int>{} : SelectedHandles();
+    for (int i = 0; i < int(handles_.size()); ++i)
+    {
+      const Vec3 p = course_->HandlePosition(handles_[i]);
+      if (!inside({p[0], p[1], p[2]}))
+        continue;
+      auto it = std::find(sel.begin(), sel.end(), i);
+      if (mode == 2 && it != sel.end())
+        sel.erase(it);
+      else if (mode != 2 && it == sel.end())
+        sel.push_back(i);
+    }
+    handle_ = sel.empty() ? -1 : sel.front();
+    extra_handles_.clear();
+    for (std::size_t k = 1; k < sel.size(); ++k)
+      extra_handles_.push_back(handles_[sel[k]]);
+    return;
+  }
+  std::vector<int> sel = mode == 0 ? std::vector<int>{} : Selection();
+  const auto& list = course_->instances();
+  for (int i = 0; i < int(list.size()); ++i)
+  {
+    if (list[i].removed || IsBackground(i))
+      continue;
+    const ModelMesh* m = models_->Find(list[i].name);
+    const bool solid = m && !m->positions.empty();
+    if ((solid && !show_models_) || (!solid && !show_missing_))
+      continue;
+    if (!inside(glm::vec3(ToGlm(list[i].matrix) * glm::vec4(LocalCenter(i), 1))))
+      continue;
+    auto it = std::find(sel.begin(), sel.end(), i);
+    if (mode == 2 && it != sel.end())
+      sel.erase(it);
+    else if (mode != 2 && it == sel.end())
+      sel.push_back(i);
+  }
+  // Keep the active object if it is still selected.
+  if (auto it = std::find(sel.begin(), sel.end(), selected_); it != sel.end())
+    std::rotate(sel.begin(), it, it + 1);
+  selected_ = sel.empty() ? -1 : sel.front();
+  extra_selected_.assign(sel.begin() + (sel.empty() ? 0 : 1), sel.end());
+  scroll_to_selection_ = true;
+  if (sel.size() > 1)
+    Status(std::to_string(sel.size()) + " objects selected. Moving/rotating/scaling the active one (#" +
+           std::to_string(selected_) + ") applies to all.");
+}
+
 void Editor::BeginEdit()
 {
   edit_snapshot_.clear();
   poly_snapshot_.clear();
   if (selected_ < 0)
     return;
-  edit_snapshot_.emplace_back(selected_, Get(selected_));
-  for (int j : Linked(selected_))
-    edit_snapshot_.emplace_back(j, Get(j));
+  // Active object first, then the other selected objects and everything linked.
+  for (int i : Selection())
+  {
+    auto has = [&](int k) {
+      return std::any_of(edit_snapshot_.begin(), edit_snapshot_.end(), [&](const auto& e) { return e.first == k; });
+    };
+    if (!has(i))
+      edit_snapshot_.emplace_back(i, Get(i));
+    for (int j : Linked(i))
+      if (!has(j))
+        edit_snapshot_.emplace_back(j, Get(j));
+  }
   std::vector<int> members;
   for (const auto& [i, t] : edit_snapshot_)
     members.push_back(i);
@@ -829,10 +954,11 @@ void Editor::SetTrackMode(bool on)
 {
   track_mode_ = on && course_;
   handle_ = -1;
+  extra_handles_.clear();
   armed_ = -1;
   if (track_mode_)
   {
-    selected_ = -1;
+    Select(-1);
     show_track_ = true;
     Status("Track editing: click a point on the track line, move it with the gizmo. "
            "Checkpoints, distances and the checkpoint grid follow; road models and walls do not.");
@@ -974,7 +1100,7 @@ std::vector<int> Editor::Spawn(const std::vector<int>& members, const std::vecto
   redo_.clear();
   if (!made.empty())
   {
-    selected_ = made.front();
+    Select(made.front());
     scroll_to_selection_ = true;
   }
   return made;
@@ -992,9 +1118,16 @@ void Editor::DuplicateSelection()
 {
   if (!course_ || selected_ < 0)
     return;
-  std::vector<int> members{selected_};
-  for (int j : Linked(selected_))
-    members.push_back(j);
+  const std::vector<int> selection = Selection();
+  std::vector<int> members;
+  for (int i : selection)
+  {
+    if (std::find(members.begin(), members.end(), i) == members.end())
+      members.push_back(i);
+    for (int j : Linked(i))
+      if (std::find(members.begin(), members.end(), j) == members.end())
+        members.push_back(j);
+  }
   const std::vector<int> polys = AttachedPolys(members);
   // Shift the copy sideways (camera right) by the object's width so it does not overlap.
   float width = 20;
@@ -1003,7 +1136,13 @@ void Editor::DuplicateSelection()
                                                   glm::vec4(m->bounds_max[0] - m->bounds_min[0], 0,
                                                             m->bounds_max[2] - m->bounds_min[2], 0))));
   const glm::vec3 right = glm::normalize(glm::cross(cam_.Forward(), glm::vec3(0, 1, 0)));
-  Spawn(members, polys, right * (width * 1.1f));
+  const std::vector<int> made = Spawn(members, polys, right * (width * 1.1f));
+  // Select the copies of the selected objects (the active one stays active).
+  for (std::size_t k = 1; k < selection.size(); ++k)
+  {
+    const auto it = std::find(members.begin(), members.end(), selection[k]);
+    extra_selected_.push_back(made[std::size_t(it - members.begin())]);
+  }
   Status("Duplicated " + std::to_string(members.size()) + " object(s)" +
          (polys.empty() ? "" : " and " + std::to_string(polys.size()) + " collision polygons") + ".");
 }
@@ -1012,27 +1151,44 @@ void Editor::DeleteSelection()
 {
   if (!course_ || selected_ < 0)
     return;
-  if (!course_->instances()[selected_].added)
+  UndoEntry e;
+  int skipped = 0, deleted = 0;
+  auto add = [&](int index, bool poly) {
+    if (std::none_of(e.alive.begin(), e.alive.end(), [&](const AliveItem& a) { return a.index == index && a.poly == poly; }))
+      e.alive.push_back({index, poly, false});
+  };
+  for (int sel : Selection())
+  {
+    if (!course_->instances()[sel].added)
+    {
+      ++skipped;
+      continue;
+    }
+    auto it = spawn_groups_.find(sel);
+    const std::vector<int> objects = it != spawn_groups_.end() ? it->second.first : std::vector<int>{sel};
+    const std::vector<int> polys = it != spawn_groups_.end() ? it->second.second : std::vector<int>{};
+    for (int i : objects)
+      if (Alive(i))
+        add(i, false);
+    for (int p : polys)
+      if (!course_->polys()[p].removed)
+        add(p, true);
+  }
+  for (const auto& a : e.alive)
+  {
+    SetAlive(a, false);
+    deleted += !a.poly;
+  }
+  if (e.alive.empty())
   {
     Status("Only objects placed in this session can be deleted (original objects cannot be removed yet).", true);
     return;
   }
-  UndoEntry e;
-  auto it = spawn_groups_.find(selected_);
-  std::vector<int> objects = it != spawn_groups_.end() ? it->second.first : std::vector<int>{selected_};
-  const std::vector<int> polys = it != spawn_groups_.end() ? it->second.second : std::vector<int>{};
-  for (int i : objects)
-    if (Alive(i))
-      e.alive.push_back({i, false, false});
-  for (int p : polys)
-    if (!course_->polys()[p].removed)
-      e.alive.push_back({p, true, false});
-  for (const auto& a : e.alive)
-    SetAlive(a, false);
   undo_.push_back(std::move(e));
   redo_.clear();
-  selected_ = -1;
-  Status("Deleted " + std::to_string(objects.size()) + " placed object(s).");
+  Select(-1);
+  Status("Deleted " + std::to_string(deleted) + " placed object(s)." +
+         (skipped ? " " + std::to_string(skipped) + " original object(s) cannot be deleted and stay." : ""));
 }
 
 void Editor::SetAlive(const AliveItem& item, bool alive)
@@ -1121,7 +1277,7 @@ void Editor::DebugStart(int course, int select, bool collision, int place, int h
   }
   if (course_ && select >= 0 && select < int(course_->instances().size()))
   {
-    selected_ = select;
+    Select(select);
     scroll_to_selection_ = true;
     FocusSelection();
   }
@@ -1351,9 +1507,12 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
         if (armed_ >= 0)
           armed_ = -1;
         else if (track_mode_ && handle_ >= 0)
+        {
           handle_ = -1;
+          extra_handles_.clear();
+        }
         else
-          selected_ = -1;
+          Select(-1);
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Delete) && course_ && !track_mode_)
         DeleteSelection();
@@ -1362,6 +1521,10 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
       DuplicateSelection();
   }
 
+  if (selected_ < 0 || !course_)
+    extra_selected_.clear();
+  if (handle_ < 0)
+    extra_handles_.clear();
   snap_line_draw_ = snap_line_;
   snap_line_ = {};
   ImGuizmo::BeginFrame();
@@ -1374,6 +1537,33 @@ void Editor::Frame(int fb_w, int fb_h, float scale, float dt)
   DrawPopups();
 
   HandleViewportInput(vx, vy, vw, vh, dt);
+  if (debug_box_pending_ && course_)
+  {
+    debug_box_pending_ = false;
+    BoxSelect({debug_box_.x, debug_box_.y}, {debug_box_.z, debug_box_.w}, 0);
+    const auto sel = Selection();
+    std::printf("box: %zu selected (active #%d)\n", sel.size(), selected_);
+    if (selected_ >= 0 && glm::length(debug_move_) > 0)
+    {
+      std::vector<Transform> before;
+      for (int i : sel)
+        before.push_back(Get(i));
+      Transform t = Get(selected_);
+      for (int k = 0; k < 3; ++k)
+        t.position[k] += debug_move_[k];
+      t.matrix = ComposeMatrix(t.position, t.rotation, t.scale);
+      BeginEdit();
+      ApplyPrimary(t);
+      EndEdit();
+      for (std::size_t k = 0; k < sel.size(); ++k)
+      {
+        const Transform now = Get(sel[k]);
+        std::printf("box: #%d %s moved %.2f %.2f %.2f\n", sel[k], course_->instances()[sel[k]].name.c_str(),
+                    now.matrix[3] - before[k].matrix[3], now.matrix[7] - before[k].matrix[7],
+                    now.matrix[11] - before[k].matrix[11]);
+      }
+    }
+  }
   RenderViewport(fb_w, fb_h, scale, vx, vy, vw, vh);
 }
 
@@ -1452,36 +1642,87 @@ void Editor::HandleViewportInput(float vx, float vy, float vw, float vh, float d
     return;
   }
 
-  // Track mode: click picks the nearest track point on screen.
-  if (track_mode_)
+  // Clicks: a click picks (Shift toggles), dragging a rectangle box-selects
+  // (Shift adds, Ctrl removes), unless the gizmo takes the click.
+  vp_rect_[0] = vx, vp_rect_[1] = vy, vp_rect_[2] = vw, vp_rect_[3] = vh;
+  const bool gizmo_shown = track_mode_ ? handle_ >= 0 : selected_ >= 0;
+  if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !(gizmo_shown && ImGuizmo::IsOver()))
   {
-    if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !(handle_ >= 0 && ImGuizmo::IsOver()))
+    box_pending_ = true;
+    box_start_ = {mp.x, mp.y};
+  }
+  if (!box_pending_)
+    return;
+  const glm::vec2 now(mp.x, mp.y);
+  const bool dragged = glm::distance(now, box_start_) > 4;
+  if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+  {
+    if (dragged)
     {
-      const glm::mat4 vp = proj_ * view_;
-      float best = 14;  // pixels
-      int pick = -1;
-      for (int i = 0; i < int(handles_.size()); ++i)
-      {
-        const Vec3 p = course_->HandlePosition(handles_[i]);
-        const glm::vec4 c = vp * glm::vec4(p[0], p[1], p[2], 1);
-        if (c.w <= 0)
-          continue;
-        const float sx = vx + (c.x / c.w * 0.5f + 0.5f) * vw, sy = vy + (0.5f - c.y / c.w * 0.5f) * vh;
-        const float d = std::hypot(sx - mp.x, sy - mp.y);
-        if (d < best)
-          best = d, pick = i;
-      }
-      handle_ = pick;
+      ImDrawList* dl = ImGui::GetForegroundDrawList();
+      const ImVec2 a(std::min(box_start_.x, now.x), std::min(box_start_.y, now.y));
+      const ImVec2 b(std::max(box_start_.x, now.x), std::max(box_start_.y, now.y));
+      dl->PushClipRect({vx, vy}, {vx + vw, vy + vh});
+      dl->AddRectFilled(a, b, IM_COL32(255, 160, 60, 40));
+      dl->AddRect(a, b, IM_COL32(255, 160, 60, 200));
+      dl->PopClipRect();
     }
     return;
   }
-
-  // Click to select (unless the gizmo takes the click).
-  if (over && course_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsOver())
+  box_pending_ = false;
+  if (!course_)
+    return;
+  if (dragged)
   {
-    selected_ = Pick(ray_o, ray_d);
-    scroll_to_selection_ = true;
+    BoxSelect(box_start_, now, io.KeyCtrl ? 2 : io.KeyShift ? 1 : 0);
+    return;
   }
+  // Plain click at the press position.
+  const float cx = (box_start_.x - vx) / vw * 2 - 1, cy = 1 - (box_start_.y - vy) / vh * 2;
+  const glm::vec4 ca = inv * glm::vec4(cx, cy, -1, 1), cb = inv * glm::vec4(cx, cy, 1, 1);
+  const glm::vec3 click_o = glm::vec3(ca) / ca.w, click_d = glm::normalize(glm::vec3(cb) / cb.w - click_o);
+  if (track_mode_)
+  {
+    // The nearest track point on screen.
+    const glm::mat4 vp = proj_ * view_;
+    float best = 14;  // pixels
+    int pick = -1;
+    for (int i = 0; i < int(handles_.size()); ++i)
+    {
+      const Vec3 p = course_->HandlePosition(handles_[i]);
+      const glm::vec4 c = vp * glm::vec4(p[0], p[1], p[2], 1);
+      if (c.w <= 0)
+        continue;
+      const float sx = vx + (c.x / c.w * 0.5f + 0.5f) * vw, sy = vy + (0.5f - c.y / c.w * 0.5f) * vh;
+      const float d = std::hypot(sx - box_start_.x, sy - box_start_.y);
+      if (d < best)
+        best = d, pick = i;
+    }
+    if (!io.KeyShift)
+    {
+      handle_ = pick;
+      extra_handles_.clear();
+    }
+    else if (pick >= 0)
+    {
+      std::vector<int> sel = SelectedHandles();
+      if (auto it = std::find(sel.begin(), sel.end(), pick); it != sel.end())
+        sel.erase(it);
+      else
+        sel.insert(sel.begin(), pick);
+      handle_ = sel.empty() ? -1 : sel.front();
+      extra_handles_.clear();
+      for (std::size_t k = 1; k < sel.size(); ++k)
+        extra_handles_.push_back(handles_[sel[k]]);
+    }
+    return;
+  }
+  const int pick = Pick(click_o, click_d);
+  if (io.KeyShift)
+    ToggleSelect(pick);
+  else
+    Select(pick);
+  scroll_to_selection_ = true;
 }
 
 void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy, float vw, float vh)
@@ -1522,7 +1763,16 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
   if (course_)
   {
     const auto& list = course_->instances();
-    const std::vector<int> linked_now = Linked(selected_);
+    const std::vector<int> selection = Selection();
+    std::vector<int> linked_now;
+    for (int i : selection)
+      for (int j : Linked(i))
+        linked_now.push_back(j);
+    std::vector<char> highlighted(list.size(), 0);
+    for (int i : selection)
+      highlighted[i] = 1;
+    for (int j : linked_now)
+      highlighted[j] = 1;
     for (int i = 0; i < int(list.size()); ++i)
     {
       const auto& in = list[i];
@@ -1530,7 +1780,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         continue;
       const glm::mat4 M = ToGlm(in.matrix);
       const GpuMesh& g = gpu_[in.name];
-      const bool sel = i == selected_ || (selected_ >= 0 && std::find(linked_now.begin(), linked_now.end(), i) != linked_now.end());
+      const bool sel = highlighted[i];
       if (g.count)
       {
         const bool bg = IsBackground(i);
@@ -1578,13 +1828,17 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         lines.push_back({a + sa, col});
       }
       if (track_mode_)
+      {
+        const std::vector<int> picked = SelectedHandles();
         for (int i = 0; i < int(handles_.size()); ++i)
         {
           const glm::vec3 p = v3(course_->HandlePosition(handles_[i]));
           const float r = std::max(2.0f, glm::distance(p, cam_.pos) * 0.008f);
+          const bool on = std::find(picked.begin(), picked.end(), i) != picked.end();
           AddBox(lines, glm::translate(glm::mat4(1), p), glm::vec3(-r), glm::vec3(r),
-                 i == handle_ ? Rgba(255, 255, 255) : Rgba(255, 140, 40));
+                 i == handle_ ? Rgba(255, 255, 255) : on ? Rgba(255, 240, 160) : Rgba(255, 140, 40));
         }
+      }
     }
     if (show_edges_ && !track_mode_)
     {
@@ -1658,7 +1912,7 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     {
       // Outline the collision polygons that move with the selection (e.g. the boost zone).
       std::vector<int> members = linked_now;
-      members.push_back(selected_);
+      members.insert(members.end(), selection.begin(), selection.end());
       for (int p : AttachedPolys(members))
       {
         const auto& v = course_->polys()[p].v;
@@ -1670,11 +1924,14 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
           lines.push_back({{b[0], b[1] + 0.3f, b[2]}, Rgba(255, 235, 0)});
         }
       }
-      const auto& in = list[selected_];
-      const ModelMesh* m = models_->Find(in.name);
-      if (m)
-        AddBox(lines, ToGlm(in.matrix), {m->bounds_min[0], m->bounds_min[1], m->bounds_min[2]},
-               {m->bounds_max[0], m->bounds_max[1], m->bounds_max[2]}, Rgba(255, 150, 30));
+      for (int i : selection)
+      {
+        const auto& in = list[i];
+        if (const ModelMesh* m = models_->Find(in.name))
+          AddBox(lines, ToGlm(in.matrix), {m->bounds_min[0], m->bounds_min[1], m->bounds_min[2]},
+                 {m->bounds_max[0], m->bounds_max[1], m->bounds_max[2]},
+                 i == selected_ ? Rgba(255, 150, 30) : Rgba(255, 200, 120, 160));
+      }
     }
   }
   renderer_.DrawLines(lines, false);
@@ -1692,15 +1949,19 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
     const bool changed = ImGuizmo::Manipulate(glm::value_ptr(view_), glm::value_ptr(proj_), ImGuizmo::TRANSLATE,
                                               ImGuizmo::WORLD, glm::value_ptr(M), nullptr, snap_ ? snap : nullptr);
     const bool using_now = ImGuizmo::IsUsing();
+    const std::vector<int> picked = SelectedHandles();
     if (using_now && !gizmo_was_using_)
     {
       handle_base_ = course_->segments()[h.segment].curves;
       handle_start_ = p;
+      handle_bases_.clear();
+      for (int i : picked)
+        handle_bases_.emplace(handles_[i].segment, course_->segments()[handles_[i].segment].curves);
     }
     if (changed && using_now)
     {
       Vec3 delta = {M[3][0] - handle_start_[0], M[3][1] - handle_start_[1], M[3][2] - handle_start_[2]};
-      if (MagnetActive())
+      if (MagnetActive() && picked.size() == 1)
       {
         // Snap onto another track point (e.g. to join two segments).
         const glm::vec3 target(M[3]);
@@ -1719,20 +1980,37 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
           }
         }
       }
-      course_->MoveHandle(h, handle_base_, delta);
+      // Every selected point moves by the same world delta. Points whose segment
+      // lies below another selected point's segment already move with that one.
+      for (const auto& [seg, base] : handle_bases_)
+        course_->SetCurves(seg, base);
+      std::set<int> segs;
+      for (int i : picked)
+        segs.insert(handles_[i].segment);
+      for (int i : picked)
+      {
+        const TrackHandle& hi = handles_[i];
+        bool below = false;
+        for (int a = course_->segments()[hi.segment].parent; a >= 0 && !below; a = course_->segments()[a].parent)
+          below = segs.count(a) != 0;
+        if (!below)
+          course_->MoveHandle(hi, course_->segments()[hi.segment].curves, delta);
+      }
       course_->UpdateTrack();
       dirty_ = true;
     }
     if (!using_now && gizmo_was_using_)
     {
-      const Curves& now = course_->segments()[h.segment].curves;
-      if (now != handle_base_)
+      UndoEntry e;
+      for (const auto& [seg, base] : handle_bases_)
+        if (course_->segments()[seg].curves != base)
+          e.curves.push_back({seg, base, course_->segments()[seg].curves});
+      if (!e.curves.empty())
       {
-        UndoEntry e;
-        e.curves.push_back({h.segment, handle_base_, now});
         undo_.push_back(std::move(e));
         redo_.clear();
       }
+      handle_bases_.clear();
       RefreshHandles();
     }
     gizmo_was_using_ = using_now;
@@ -1784,7 +2062,9 @@ void Editor::RenderViewport(int fb_w, int fb_h, float scale, float vx, float vy,
         if (gizmo_op_ == 0 && MagnetActive())
         {
           // Snap a vertex of the moved object onto a vertex of another one.
-          std::vector<int> exclude = Linked(selected_);
+          std::vector<int> exclude;
+          for (const auto& [k, before] : edit_snapshot_)
+            exclude.push_back(k);
           exclude.push_back(selected_);
           const glm::mat4 pre = ToGlm(t.matrix) * glm::inverse(ToGlm(course_->instances()[selected_].matrix));
           if (glm::vec3 snap; Snap({selected_}, exclude, pre, snap))
@@ -1850,7 +2130,7 @@ void Editor::DrawMenu()
     ImGui::Separator();
     if (ImGui::MenuItem("Duplicate selection", "Ctrl+D", false, selected_ >= 0))
       DuplicateSelection();
-    if (ImGui::MenuItem("Delete placed object", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
+    if (ImGui::MenuItem("Delete placed object(s)", "Del", false, selected_ >= 0 && course_->instances()[selected_].added))
       DeleteSelection();
     if (ImGui::MenuItem("Connect road to nearest open edge", "C", false, selected_ >= 0 && !track_mode_))
       ConnectSelection();
@@ -1881,7 +2161,9 @@ void Editor::DrawMenu()
     ImGui::TextUnformatted(
         "Camera:    hold right mouse button + WASD/QE to fly, mouse wheel = speed\n"
         "           mouse wheel = forward/back, middle mouse button = pan\n"
-        "Selection: left click in the 3D view or in the object list\n"
+        "Selection: left click in the 3D view or in the object list,\n"
+        "           Shift+click adds/removes, drag a rectangle to box-select\n"
+        "           (Shift adds, Ctrl removes); also for track points\n"
         "Gizmo:     W move, E rotate, R scale, F focus\n"
         "Track:     T toggles track editing: click a point on the track line,\n"
         "           move it with the gizmo (checkpoints follow, road models do not)\n"
@@ -2004,8 +2286,13 @@ void Editor::DrawObjectList()
                     in.added ? "  +" : Modified(i) ? "  *" : "");
       if (!g.count)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1));
-      if (ImGui::Selectable(label, i == selected_))
-        selected_ = i;
+      if (ImGui::Selectable(label, IsSelected(i)))
+      {
+        if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl)
+          ToggleSelect(i);
+        else
+          Select(i);
+      }
       if (!g.count)
         ImGui::PopStyleColor();
       if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -2056,7 +2343,7 @@ void Editor::DrawStructurePanel()
       if (ImGui::Selectable(st.label.c_str(), armed_ == k))
       {
         armed_ = armed_ == k ? -1 : k;
-        selected_ = -1;
+        Select(-1);
       }
       if (st.uses > 1)
       {
@@ -2177,6 +2464,11 @@ void Editor::DrawInspector(float x, float y, float w, float h)
     return;
   }
   auto& in = course_->instances()[selected_];
+  if (const std::size_t n = Selection().size(); n > 1)
+  {
+    ImGui::TextColored({1, 0.75f, 0.4f, 1}, "%zu objects selected", n);
+    ImGui::TextDisabled("Values below: the active object. Moving,\nrotating and scaling it applies to all.");
+  }
   ImGui::Text("#%d  %s", selected_, in.name.c_str());
   if (in.added)
     ImGui::TextColored({0.4f, 1, 0.55f, 1}, "Placed in the editor (Del deletes it)");
@@ -2284,7 +2576,7 @@ void Editor::DrawInspector(float x, float y, float w, float h)
       std::snprintf(label, sizeof label, "  #%d %s", j, course_->instances()[j].name.c_str());
       if (ImGui::Selectable(label, false))
       {
-        selected_ = j;
+        Select(j);
         scroll_to_selection_ = true;
       }
       ImGui::PopID();

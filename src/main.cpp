@@ -82,12 +82,14 @@ int main(int argc, char** argv)
 {
   Settings settings;
   settings.workspace = fs::path(FZGX_SOURCE_DIR) / "work";  // git-ignored
-  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY] [--scale F] [--connect YAW]
+  // --screenshot FILE.ppm [--course N] [--select I] [--collision] [--no-textures] [--place S] [--track-lift H DY] [--scale F] [--connect YAW] [--box X0 Y0 X1 Y1 [--move DX DY DZ]]
   // [--cups]:
   // render, save, quit (for testing and documentation).
   std::string screenshot;
   int start_course = -1, start_select = -1, start_place = -1, start_handle = -1;
   float start_lift = 0, start_scale = 0, start_connect = -1000;
+  float start_box[4] = {0, 0, 0, 0}, start_move[3] = {0, 0, 0};
+  bool use_box = false;
   bool start_collision = false, no_textures = false, show_cups = false;
   for (int i = 1; i < argc; ++i)
   {
@@ -112,6 +114,18 @@ int main(int argc, char** argv)
       start_scale = float(std::atof(argv[++i]));  // scale the selection (--select) in place
     else if (a == "--connect" && i + 1 < argc)
       start_connect = float(std::atof(argv[++i]));  // duplicate the selection, turn it, connect it
+    else if (a == "--box" && i + 4 < argc)
+    {
+      // box-select a screen rectangle (UI units) on the first frame
+      for (int k = 0; k < 4; ++k)
+        start_box[k] = float(std::atof(argv[++i]));
+      use_box = true;
+    }
+    else if (a == "--move" && i + 3 < argc)
+    {
+      for (int k = 0; k < 3; ++k)
+        start_move[k] = float(std::atof(argv[++i]));  // after --box: move the selection
+    }
     else if (a == "--collision")
       start_collision = true;
     else if (a == "--no-textures")
@@ -190,6 +204,9 @@ int main(int argc, char** argv)
     editor.DebugScale(start_scale);
   if (start_connect > -1000)
     editor.DebugConnect(start_connect);
+  if (use_box)
+    editor.DebugBox({start_box[0], start_box[1], start_box[2], start_box[3]},
+                    {start_move[0], start_move[1], start_move[2]});
   if (show_cups)
     editor.ShowCups();
   int frame = 0;

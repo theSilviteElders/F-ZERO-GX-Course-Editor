@@ -91,14 +91,18 @@ read_setup() {
 }
 frames() { sed -n 's/^frame_count=//p' "$auto/status.txt" 2>/dev/null || echo 0; }
 
-"${runner[@]}" --automation-dir "$auto" &
-pid=$!
-# Wait until the game is running.
-for _ in $(seq 1 600); do
-    [[ "$(sed -n 's/^booted=//p' "$auto/status.txt" 2>/dev/null)" == 1 ]] && break
-    kill -0 "$pid" 2>/dev/null || { echo "[run-test] game exited during boot" >&2; exit 1; }
-    sleep 0.1
-done
+# Starts the runner (again) with a fresh automation folder and waits for the boot.
+boot() {
+    rm -rf "$auto"; mkdir -p "$auto/commands"; seq=0
+    "${runner[@]}" --automation-dir "$auto" &
+    pid=$!
+    for _ in $(seq 1 600); do
+        [[ "$(sed -n 's/^booted=//p' "$auto/status.txt" 2>/dev/null)" == 1 ]] && return 0
+        kill -0 "$pid" 2>/dev/null || { echo "[run-test] game exited during boot" >&2; exit 1; }
+        sleep 0.1
+    done
+}
+boot
 
 # The disc's file table (FST) is part of every savestate. The mod folder is a
 # virtual disc whose FST changes whenever a file changes size (edited course,
@@ -140,18 +144,29 @@ if [[ -f "$state" ]]; then
     done
 else
     echo "[run-test] building quick-start savestate (about 30 s)"
-    # Title screen: wait for the logo, then Start.
-    while (( $(frames) < 1500 )); do sleep 0.2; done
-    press start 2.5          # -> Select Mode (cursor on Grand Prix)
-    press dpad_down 0.8      # -> Practice
-    press a 3                # -> Select Cup (Ruby)
-    press a 3                # -> Select Course (Twist Road)
-    press a 3                # -> Select Machine (Blue Falcon)
-    press a 2.5              # -> Machine Settings
-    press a 2.5              # -> Practice dialog, cursor on OK
-    read_setup
-    cmd "command=read_memory address=$(printf '0x%X' $((setup + 0x90))) size=4 path=check.bin"
-    if [[ "$(od -An -tx1 -j1 -N1 "$auto/check.bin" | tr -d ' ')" != 01 ]]; then
+    # The title screen runs an attract demo; a Start press during one of its
+    # loading phases is lost, so the navigation is checked and retried from a
+    # fresh boot with a different timing.
+    ok=0
+    for start_frame in 1300 1000 1700; do
+        while (( $(frames) < start_frame )); do sleep 0.2; done
+        press start 2.5          # -> Select Mode (cursor on Grand Prix)
+        press dpad_down 0.8      # -> Practice
+        press a 3                # -> Select Cup (Ruby)
+        press a 3                # -> Select Course (Twist Road)
+        press a 3                # -> Select Machine (Blue Falcon)
+        press a 2.5              # -> Machine Settings
+        press a 2.5              # -> Practice dialog, cursor on OK
+        read_setup
+        cmd "command=read_memory address=$(printf '0x%X' $((setup + 0x90))) size=4 path=check.bin"
+        if [[ "$(od -An -tx1 -j1 -N1 "$auto/check.bin" | tr -d ' ')" == 01 ]]; then
+            ok=1; break
+        fi
+        echo "[run-test] menu navigation missed (Start at frame $start_frame), retrying"
+        kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+        boot
+    done
+    if (( ! ok )); then
         echo "[run-test] menu navigation did not reach the course selection; staying in the menu" >&2
         wait "$pid"; exit 0
     fi

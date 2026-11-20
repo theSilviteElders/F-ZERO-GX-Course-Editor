@@ -2174,7 +2174,7 @@ void Editor::DrawCups()
     return std::string(buf);
   };
 
-  ImGui::SeparatorText("Game cups (Grand Prix)");
+  ImGui::SeparatorText("Game cups");
   if (ImGui::BeginTable("##orig", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit))
   {
     for (const auto& c : OriginalCups())
@@ -2192,8 +2192,8 @@ void Editor::DrawCups()
   }
 
   ImGui::SeparatorText("Custom cups");
-  ImGui::TextWrapped("Custom cups appear in Grand Prix behind the AX Cup: an arrow leads to a second page "
-                     "with these cups. Up to %d cups with up to %d courses each.",
+  ImGui::TextWrapped("Custom cups appear in every cup selection (Grand Prix, Time Attack, Practice, VS) "
+                     "behind the AX Cup: an arrow leads to a second page with these cups. Up to %d cups with up to %d courses each.",
                      kMaxCustomCups, kMaxCupCourses);
   std::vector<int> race_courses;
   for (const auto& c : courses_)

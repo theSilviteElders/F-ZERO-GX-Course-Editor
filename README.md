@@ -98,11 +98,13 @@ editor under *File → Settings* or with
   together: same name prefix, within the radius.
 - **Cups:** the course list shows each course's track name and the cups it
   belongs to. *File → Cups…* lists the game's cups and lets you create up to
-  two **custom Grand Prix cups** (name, gem colour of the icon, up to five
+  two **custom cups** (name, gem colour of the icon, up to five
   courses). *Save cups and write mod folder* (and every F5) writes a patched
   `sys/main.dol` and the icons into the mod folder. In the game the cup
   selection gets an arrow behind the AX Cup that leads to a second page with
-  the custom cups. Start the game normally (direct start off) to pick them.
+  the custom cups, in every mode with a cup selection (Grand Prix, Time
+  Attack, Practice, VS Battle). Start the game normally (direct start off) to
+  pick them.
   Details: [docs/cup-format.md](docs/cup-format.md).
 - **Textures:** *View → Textures* or *File → Settings → Load textures*
   (on by default, saved in `work/editor.ini`). Without textures the models are
@@ -187,9 +189,10 @@ and write to a separate file), `unlz`, `lz`.
 - Textures use only the first layer and the first UV set (no multi-texture
   blending, texture scrolling or environment maps).
 - Generated road models for new track pieces, snapping track pieces together.
-- Custom cups: at most two, only in Grand Prix (not Time Attack/Practice),
-  NTSC-U only. Menus, cup intro, course screen and the first race are tested
-  in the game; a complete Grand Prix to the results screen is not tested yet.
+- Custom cups: at most two, NTSC-U only. Tested in the game: menus, cup
+  intro, course screens and the first race in Grand Prix, Time Attack and
+  Practice. Not tested yet: a complete Grand Prix to the results screen, and
+  VS Battle (needs two controllers).
   The glow of the selected custom cup icon uses the AX Cup colour.
 
 ## AI disclosure

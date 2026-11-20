@@ -7,7 +7,8 @@
 #           engine (OSLink hook, patch applier) | game hooks | patch table
 #
 # Custom cups use the game's unused cup indices 9 and 10 (E3 demo cups), so the
-# game's own cup tables (11 rows) keep their size. Only Grand Prix offers them.
+# game's own cup tables (11 rows) keep their size. Every mode with a cup
+# selection (Grand Prix, Time Attack, Practice, VS Battle) offers them.
 
         .org BASE
 header:
@@ -184,7 +185,7 @@ flush_loop:
         blr
 
 # --- helpers --------------------------------------------------------------------
-# r11 = config, cr7 = "cup r3 is an enabled custom cup and the mode is Grand Prix"
+# r11 = config, cr7 = "cup r3 is an enabled custom cup" (any game mode)
 # (sets cr7 eq). Clobbers r11, r12.
 is_custom:
         lis 11, @h(config)
@@ -195,9 +196,7 @@ is_custom:
         addi 12, 12, 9
         cmpw cr7, 3, 12
         bge cr7, not_custom
-        lwz 12, V_SETUP(11)
-        lha 12, 0(12)
-        cmpwi cr7, 12, 1
+        cmpw cr7, 3, 3                  # eq
         blr
 not_custom:
         cmpwi cr7, 11, 0                # r11 != 0: ne
@@ -238,10 +237,6 @@ hk_count:
         lbz 0, CFG_COUNT(11)
         cmpwi cr7, 0, 0
         beq cr7, count_done
-        lha 12, 0(15)
-        cmpwi cr7, 12, 1                # Grand Prix only
-        li 12, 0
-        bne cr7, count_done
         stw 18, V_NORIG(11)
         lha 12, 0x8c(15)
         cmpwi cr7, 12, 9
@@ -350,7 +345,7 @@ size_small:
         blr
 
 # --- game hooks: main module (module 1) -----------------------------------------
-# FindCup(course r3, &cup r4, &slot r5): in a custom-cup Grand Prix, search the
+# FindCup(course r3, &cup r4, &slot r5): when a custom cup is selected, search the
 # active cup first so that courses shared with an original cup map to it.
 hk_find:
         mflr 0

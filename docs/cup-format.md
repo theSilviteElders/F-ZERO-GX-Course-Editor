@@ -108,7 +108,8 @@ The editor writes two files into the mod folder:
      10 and 15. The entries copy data, place branches to and from the hooks,
      and store addresses (race setup, FindCup table) for the hooks. All
      targets are section-relative, so they follow the module.
-   - Custom cups use cup indices 9 and 10 (only in Grand Prix):
+   - Custom cups use cup indices 9 and 10, in every mode that shows the cup
+     selection:
      - the rows are written into the three cup tables;
      - the selectability checks accept them;
      - FindCup prefers the active custom cup, so a course that is also in an
@@ -140,12 +141,14 @@ Verified in GLINUX (headless automation and screenshots):
 
 - both pages, the cursor, names and icons;
 - the intro and course screens with the custom cup's course list;
-- the first race starts with the custom cup's first course;
+- Grand Prix: the first race starts with the custom cup's first course;
+- Time Attack (mode 2) and Practice (mode 3): second page, the course
+  selection lists the custom cup's courses, the chosen course starts;
 - the direct start still works with the moved main module.
 
 Not verified: a full Grand Prix to the end (results and ranking screens with
-cup 9/10), Time Attack/Practice (the custom cups are only offered in Grand
-Prix), and other languages (PAL).
+cup 9/10), VS Battle (needs two controllers; the same menu code is used), and
+other languages (PAL).
 
 ## Tools used for reverse engineering
 

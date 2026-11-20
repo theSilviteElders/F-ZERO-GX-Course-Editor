@@ -1,9 +1,9 @@
-// Grand Prix cups: the game's own cups and up to two custom cups.
+// Cups: the game's own cups and up to two custom cups.
 //
 // Custom cups are added by patching main.dol (a small code section, see
 // tools/cup_patch.s and docs/cup-format.md) and by appending the cup icons
 // to bmp_e/bmp_selgf.tpl. They use the game's unused cup indices 9 and 10 and
-// appear on a second page of the Grand Prix cup selection.
+// appear on a second page of the cup selection (in every game mode).
 #pragma once
 #include "binary.hpp"
 #include "tpl.hpp"

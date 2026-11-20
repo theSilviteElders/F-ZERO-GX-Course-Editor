@@ -91,8 +91,10 @@ the position display still work?
 4. Pick your cup: the cup intro and the course screen should show your cup's
    icon, name and courses, and the first race should be your first course.
 
-Most interesting to report: does a whole Grand Prix in the custom cup work to
-the end (next races, results screen, ranking)? Removing all custom cups and
+The custom cups are also on the second page in Time Attack, Practice and VS
+Battle. Most interesting to report: does a whole Grand Prix in the custom cup
+work to the end (next races, results screen, ranking), and does VS Battle
+work? Removing all custom cups and
 saving restores the original files.
 
 ## 3. Save and start the game
